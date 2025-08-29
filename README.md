@@ -8,6 +8,10 @@ Script for automating linux package installs in online and air-gapped environmen
 - When using 'offline' a pre-generated tarball from 'save' must be copied to the same directory the script is running
 - When using 'offline' the air-gapped host operating system must be the same version and kernel as the host that generated the tarball to avoid package dependency errors
 
+## Limitations
+
+- install_packages.sh does not automatically add repositories or GPG keys. Packages that require special repository handling, such as docker-ce, or kubectl must be added prior to running this script.
+
 ## Usage
 
 ```
