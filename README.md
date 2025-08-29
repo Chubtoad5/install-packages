@@ -6,6 +6,7 @@ Script for automating linux package installs in online and air-gapped environmen
 - Supported operating systems: ```ubuntu|debian|rhel|centos|rocky|almalinux|fedora|sles|opensuse-leap```
 - Internet connection when using 'online' and/or 'save'
 - When using 'offline' a pre-generated tarball from 'save' must be copied to the same directory the script is running
+- When using 'offline' the air-gapped host operating system must be the same version and kernel as the host that generated the tarball to avoid package dependency errors
 
 ## Usage
 
