@@ -9,10 +9,12 @@ Script for automating linux package installs in online and air-gapped environmen
 
 ## Usage
 
-```git clone https://github.com/Chubtoad5/install-packages.git```
-```cd install-packages```
-```chmod +x install_packages.sh```
-```sudo ./install_packages.sh```
+```
+git clone https://github.com/Chubtoad5/install-packages.git
+cd install-packages
+chmod +x install_packages.sh
+sudo ./install_packages.sh
+```
 
 ```
 Usage: install_packages.sh [offline] [save] [online] [package1 package2 package3 ...]
