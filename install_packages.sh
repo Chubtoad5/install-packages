@@ -332,10 +332,12 @@ validate_runtime
 if [[ $AIR_GAPPED_MODE -eq 1 ]] || [[ $ONLINE_MODE -eq 1 ]]; then
   install_packages
   echo "Finished installing ${PACKAGES_LIST[@]}"
+  echo "--- Install_pacakges completed ---"
 fi
 if [[ $SAVE_MODE -eq 1 ]]; then
   save_packages
-  echo "Packages have been saved to $base_dir/offline-packages.tar.gz"
-  echo "Copy $base_dir/offline-packages.tar.gz and $SCRIPT_NAME to the same directory on the air-gapped host then run:"
-  echo "    sudo ./$SCRIPT_NAME offline ${PACKAGES_LIST[@]}"
+  echo "Packages archived to $base_dir/offline-packages.tar.gz"
+  echo "Copy offline-packages.tar.gz and $SCRIPT_NAME to air-gapped host and run:"
+  echo "sudo ./$SCRIPT_NAME offline ${PACKAGES_LIST[@]}"
+  echo "--- Install_pacakges save completed ---"
 fi
