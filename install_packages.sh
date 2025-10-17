@@ -203,6 +203,7 @@ save_packages() {
       cd "$DOWNLOAD_DIR"
       # Get the full list of packages, including dependencies.
       # Add a check to ensure the list is not empty
+      apt-get update -qq
       local packages_to_download=$(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --no-pre-depends "${PACKAGES_LIST[@]}" | grep "^\w")
       
       if [[ -z "$packages_to_download" ]]; then
@@ -239,7 +240,7 @@ save_packages() {
       # Clean up cache before downloading to avoid conflicts
       echo "Cleaning Zypper cache..."
       rm -rf /var/cache/zypp/packages/*
-
+      zypper refresh
       echo "Downloading ${PACKAGES_LIST[*]}..."
       zypper install --download-only "${PACKAGES_LIST[@]}"
       
