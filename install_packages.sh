@@ -300,7 +300,7 @@ if [[ $SAVE_MODE -eq 1 ]]; then
   echo "Saving [ ${PACKAGES_LIST[@]} ] on $os_id..."
   save_packages
   echo "Copy $base_dir/offline-packages.tar.gz and $SCRIPT_NAME to air-gapped host and run:"
-  echo "    sudo ./$SCRIPT_NAME offline ${PACKAGES_LIST[@]}"
+  echo "    'sudo ./$SCRIPT_NAME offline ${PACKAGES_LIST[@]}'"
 fi
 echo "--- Package Installer Ended at $(date) ---"
 
