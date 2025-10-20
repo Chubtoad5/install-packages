@@ -284,7 +284,7 @@ done
 validate_runtime
 
 # Display script settings
-echo "--- Package Installer Started at $(date) ---"
+echo "### --- Package Installer Started at $(date) --- ###"
 echo "  AIR_GAPPED_MODE: $AIR_GAPPED_MODE"
 echo "  SAVE_MODE: $SAVE_MODE"
 echo "  ONLINE_MODE: $ONLINE_MODE"
@@ -302,6 +302,6 @@ if [[ $SAVE_MODE -eq 1 ]]; then
   echo "Copy $base_dir/offline-packages.tar.gz and $SCRIPT_NAME to air-gapped host and run:"
   echo "    'sudo ./$SCRIPT_NAME offline ${PACKAGES_LIST[@]}'"
 fi
-echo "--- Package Installer Ended at $(date) ---"
+echo "### --- Package Installer Ended at $(date) --- ###"
 
 # --- End Main Script --- #
