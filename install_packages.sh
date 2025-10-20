@@ -105,7 +105,7 @@ install_packages() {
         else
             echo "Sources.list directory not found. Skipping backup."
         fi
-        echo "deb [trusted=yes] file:$local_repo_dir ./" | tee -a /etc/apt/sources.list.d/offline-packages.list 
+        echo "deb [trusted=yes] file:$local_repo_dir ./" | tee -a /etc/apt/sources.list.d/offline-packages.list &> /dev/null
         apt-get update -qq && echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PACKAGES_LIST[@]}" &> /dev/null
         if [[ $? -ne 0 ]]; then
             echo "Error: apt-get install failed." >&2
