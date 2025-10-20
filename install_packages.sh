@@ -13,6 +13,8 @@ SAVE_MODE=0
 ONLINE_MODE=0
 base_dir=$(pwd)
 PACKAGES_LIST=()
+mode_msg=""
+os_id=""
 
 
 usage() {
@@ -50,7 +52,6 @@ os_type() {
     if [[ -f /etc/os-release ]]; then
         # shellcheck disable=SC1091
         source /etc/os-release
-        echo "OS type is: $ID"
         os_id="$ID"
     else
         echo "Unknown or unsupported OS $os_id."
@@ -59,28 +60,43 @@ os_type() {
 }
 
 validate_runtime() {
-  # check if AIR_GAPPED_MODE is set, then validate the tarball and extract it
+
+  # Determine mode and packages
   if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+    if [[ $SAVE_MODE -eq 1 ]]; then
+      echo "Error: 'offline' and 'save' modes cannot be used together."
+      usage
+    fi
+    if [[ $ONLINE_MODE -eq 1 ]]; then
+      echo "Error: 'offline' and 'online' modes cannot be used together."
+      usage
+    fi
     if [[ -f "$base_dir/offline-packages.tar.gz" ]]; then
-      echo "Tarball found. Extracting..."
+      echo "Extracting tarball..."
       tar -xzf "$base_dir/offline-packages.tar.gz" -C "$base_dir"
     else
       echo "Tarball not found. Please place it in the same directory as this script."
       exit 1
     fi
   fi
+  if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
+    if [[ $ONLINE_MODE -eq 0 ]] && [[ $SAVE_MODE -eq 0 ]]; then
+      echo "Error: One of 'offline', 'save', or 'online' modes must be specified."
+      usage
+    fi
+  fi
+  if [[ ${#PACKAGES_LIST[@]} -eq 0 ]]; then
+      echo "Error: No packages specified."
+      usage
+  fi
 }
 
 install_packages() {
-  # check for airgapped and different OS version installs
   local_repo_dir="$base_dir/offline-packages"
   case "$os_id" in
     ubuntu|debian)
       if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-        echo "installing offline packages..."
         source_dir="/etc/apt/sources.list.d/"
-        # Back up and disable existing online repositories
-        echo "Disabling online repositories..."
         if [ -d "$source_dir" ]; then
             for file in "$source_dir"/*; do
                 [ -e "$file" ] && mv "$file" "${file}.bak"
@@ -89,11 +105,12 @@ install_packages() {
         else
             echo "Sources.list directory not found. Skipping backup."
         fi
-        echo "Creating local repository and installing offline packages..."
         echo "deb [trusted=yes] file:$local_repo_dir ./" | tee -a /etc/apt/sources.list.d/offline-packages.list 
-        apt-get update -qq
-        echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PACKAGES_LIST[@]}" &> /dev/null
-        echo "Restoring online repositories..."
+        apt-get update -qq && echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PACKAGES_LIST[@]}" &> /dev/null
+        if [[ $? -ne 0 ]]; then
+            echo "Error: apt-get install failed." >&2
+            return 1
+        fi
         rm -f /etc/apt/sources.list.d/offline-packages.list
         if [ -d "$source_dir" ]; then
             for file in "$source_dir"/*.bak; do
@@ -104,13 +121,10 @@ install_packages() {
             echo "Sources.list directory not found. Skipping restore."
         fi
       elif [[ $ONLINE_MODE -eq 1 ]]; then
-        echo "installing online packages..."
-        if apt-get update -qq && \
-          echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PACKAGES_LIST[@]}" &> /dev/null; then
-          echo "${PACKAGES_LIST[@]} installed successfully."
-        else
-          echo "Failed to install one or more packages from ${PACKAGES_LIST[@]}"
-          exit 1
+        apt-get update -qq && echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PACKAGES_LIST[@]}" &> /dev/null
+        if [[ $? -ne 0 ]]; then
+            echo "Error: apt-get install failed." >&2
+            return 1
         fi
       else
         echo "Installation method not specified."
@@ -119,8 +133,7 @@ install_packages() {
       ;;
     rhel|centos|rocky|almalinux|fedora)
       if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-        # offline install for RHEL based
-        echo "installing offline packages..."
+        echo "Backing up repositories and creating local..."
         cat <<EOF | tee /etc/yum.repos.d/offline-packages.repo
 [offline-packages-repo]
 name=Offline Packages Repository
@@ -138,8 +151,8 @@ EOF
             echo "Repository directory not found. Skipping backup."
         fi
         rm -f /etc/yum.repos.d/offline-packages.repo
+        echo "Package install finished"
       elif [[ $ONLINE_MODE -eq 1 ]]; then
-        echo "installing online packages..."
         if command -v dnf &> /dev/null; then
             dnf clean all
             dnf install -y "${PACKAGES_LIST[@]}"
@@ -147,6 +160,7 @@ EOF
             yum clean all
             yum install -y "${PACKAGES_LIST[@]}"
         fi
+        echo "Package install finished"
       else
         echo "Installation method not specified."
         exit 1
@@ -155,27 +169,21 @@ EOF
     sles|opensuse-leap)
       if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
         # offline install for SLES based
-        echo "Disabling online repositories..."
+        echo "Backing up repositories and creating local..."
         zypper repos --export /tmp/repos.bak
         zypper removerepo --all
-
-        # Add the local repository
-        echo "Creating local repository..."
         zypper addrepo "file://$local_repo_dir" "offline-packages-repo"
-        
-        # Refresh and install packages
         zypper refresh
         zypper --no-refresh install -y "${PACKAGES_LIST[@]}"
-        
-        # Clean up and restore
-        echo "Restoring online repositories..."
+        echo "Restoring repositories..."
         zypper removerepo offline-packages-repo
         zypper repos --import /tmp/repos.bak
         rm -f /tmp/repos.bak
+        echo "Package install finished"
       elif [[ $ONLINE_MODE -eq 1 ]]; then
-        echo "installing online packages..."
         zypper refresh
         zypper install -y "${PACKAGES_LIST[@]}"
+        echo "Package install finished"
       else
         echo "Installation method not specified."
         exit 1
@@ -190,28 +198,20 @@ EOF
 }
 
 save_packages() {
-  echo "Saving offline packages for $os_id..."
   DOWNLOAD_DIR="$base_dir/offline-packages"
   mkdir -p "$DOWNLOAD_DIR"
   case "$os_id" in
     ubuntu|debian)
       echo "installing dpkg-dev..."
-      # Using sudo and -y -qq for non-interactive installation
       echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq install dpkg-dev &> /dev/null
-
-      echo "Downloading ${PACKAGES_LIST[*]}..."
       cd "$DOWNLOAD_DIR"
-      # Get the full list of packages, including dependencies.
-      # Add a check to ensure the list is not empty
       apt-get update -qq
       local packages_to_download=$(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --no-pre-depends "${PACKAGES_LIST[@]}" | grep "^\w")
-      
       if [[ -z "$packages_to_download" ]]; then
           echo "Error: Failed to resolve dependencies for packages. Aborting." >&2
           cd "$base_dir"
           return 1
       fi
-      
       apt-get download $packages_to_download &> /dev/null
       if [[ $? -ne 0 ]]; then
           echo "Error: apt-get download failed." >&2
@@ -220,36 +220,19 @@ save_packages() {
       fi
       dpkg-scanpackages -m . > Packages
       cd "$base_dir"
-      echo "Completed creating repository metadata for $os_id."
       ;;
     rhel|centos|rocky|almalinux|fedora)
-      echo "installing dnf-utils and createrepo_c..."
-      # Use sudo and -y for non-interactive installation
       dnf install -y dnf-utils createrepo_c
-
-      echo "Downloading ${PACKAGES_LIST[*]}..."
       dnf download --resolve --downloaddir="$DOWNLOAD_DIR" "${PACKAGES_LIST[@]}"
       createrepo_c "$DOWNLOAD_DIR"
-      echo "Completed creating repository metadata for $os_id."
       ;;
     sles|opensuse-leap)
-      echo "installing createrepo_c..."
-      # Correcting the package manager from dnf to zypper
       zypper install -y createrepo_c
-
-      # Clean up cache before downloading to avoid conflicts
-      echo "Cleaning Zypper cache..."
       rm -rf /var/cache/zypp/packages/*
       zypper refresh
-      echo "Downloading ${PACKAGES_LIST[*]}..."
       zypper install --download-only "${PACKAGES_LIST[@]}"
-      
-      # Use find with -exec to handle any directory structure issues in the cache
-      # This is more robust than a simple `cp`.
       find /var/cache/zypp/packages/ -name "*.rpm" -exec sudo cp {} "$DOWNLOAD_DIR" \;
-
       createrepo_c "$DOWNLOAD_DIR"
-      echo "Completed creating repository metadata for $os_id."
       ;;
     *)
       echo "Error: Unsupported OS '$os_id'. Manual download of packages may be required for air-gapped mode." >&2
@@ -257,8 +240,6 @@ save_packages() {
       return 1
       ;;
   esac
-  # Archive the packages
-  echo "Archiving packages..."
   tar -czf "$base_dir/offline-packages.tar.gz" -C "$base_dir" "offline-packages"
   rm -rf "$base_dir/offline-packages"
 }
@@ -270,6 +251,9 @@ if [[ $EUID -ne 0 ]]; then
     echo "Error: This script must be run with sudo or as root."
     usage
 fi
+
+# Verify Operating System
+os_type
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -296,49 +280,28 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate run mode
-if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-  if [[ $SAVE_MODE -eq 1 ]]; then
-    echo "Error: 'offline' and 'save' modes cannot be used together."
-    usage
-  fi
-  if [[ $ONLINE_MODE -eq 1 ]]; then
-    echo "Error: 'offline' and 'online' modes cannot be used together."
-    usage
-  fi
-fi
-if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
-  if [[ $ONLINE_MODE -eq 0 ]] && [[ $SAVE_MODE -eq 0 ]]; then
-    echo "Error: One of 'offline', 'save', or 'online' modes must be specified."
-    usage
-  fi
-fi
-if [[ ${#PACKAGES_LIST[@]} -eq 0 ]]; then
-    echo "Error: No packages specified."
-    usage
-fi
+# Validate Execution
+validate_runtime
 
-echo "Script settings:"
+# Display script settings
+echo "--- Package Installer Started at $(date) ---"
 echo "  AIR_GAPPED_MODE: $AIR_GAPPED_MODE"
 echo "  SAVE_MODE: $SAVE_MODE"
 echo "  ONLINE_MODE: $ONLINE_MODE"
 echo "  PACKAGES_LIST: ${PACKAGES_LIST[@]}"
-
-# Grab OS flavor
-os_type
-
-# Process packages
-validate_runtime
+echo "  OS: $ID"
 
 if [[ $AIR_GAPPED_MODE -eq 1 ]] || [[ $ONLINE_MODE -eq 1 ]]; then
+  echo "Installing [ ${PACKAGES_LIST[@]} ] on $os_id..."
   install_packages
-  echo "Finished installing ${PACKAGES_LIST[@]}"
-  echo "--- install_packages completed ---"
+  echo "Finished installing ${PACKAGES_LIST[@]} on $os_id"
 fi
 if [[ $SAVE_MODE -eq 1 ]]; then
+  echo "Saving [ ${PACKAGES_LIST[@]} ] on $os_id..."
   save_packages
-  echo "Packages archived to $base_dir/offline-packages.tar.gz"
-  echo "Copy offline-packages.tar.gz and $SCRIPT_NAME to air-gapped host and run:"
-  echo "sudo ./$SCRIPT_NAME offline ${PACKAGES_LIST[@]}"
-  echo "--- install_packages save completed ---"
+  echo "Copy $base_dir/offline-packages.tar.gz and $SCRIPT_NAME to air-gapped host and run:"
+  echo "    sudo ./$SCRIPT_NAME offline ${PACKAGES_LIST[@]}"
 fi
+echo "--- Package Installer Ended at $(date) ---"
+
+# --- End Main Script --- #
