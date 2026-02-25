@@ -203,9 +203,8 @@ save_packages() {
   case "$os_id" in
     ubuntu|debian)
       echo "  installing dpkg-dev"
-      echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq install dpkg-dev &> /dev/null
+      apt-get update -qq && echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq install dpkg-dev &> /dev/null
       cd "$DOWNLOAD_DIR"
-      apt-get update -qq
       local packages_to_download=$(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --no-pre-depends "${PACKAGES_LIST[@]}" | grep "^\w")
       if [[ -z "$packages_to_download" ]]; then
           echo "Error: Failed to resolve dependencies for packages. Aborting." >&2
@@ -227,6 +226,7 @@ save_packages() {
       createrepo_c "$DOWNLOAD_DIR"
       ;;
     sles|opensuse-leap)
+      zypper refresh
       zypper install -y createrepo_c
       rm -rf /var/cache/zypp/packages/*
       zypper refresh
