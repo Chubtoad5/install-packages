@@ -1,6 +1,17 @@
 # install-packages
 Script for automating linux package installs in online and air-gapped environments
 
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Pre-requisites](#pre-requisites)
+- [Limitations](#limitations)
+- [Usage](#usage)
+
+---
+
 ## Quick Start
 
 New here? `install_packages.sh` installs OS packages in three modes: straight from the internet
