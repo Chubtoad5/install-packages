@@ -1,6 +1,40 @@
 # install-packages
 Script for automating linux package installs in online and air-gapped environments
 
+## Quick Start
+
+New here? `install_packages.sh` installs OS packages in three modes: straight from the internet
+(`online`), or by pre-downloading them on a connected host (`save`) so you can install them later on
+an **air-gapped** machine (`offline`).
+
+**Prerequisites**
+- A supported OS: Ubuntu/Debian, RHEL/CentOS/Rocky/AlmaLinux/Fedora, or SLES/openSUSE Leap
+- `root` / `sudo`
+- Internet access for `online` and `save` (not needed for `offline`)
+
+**1. Get the script**
+```bash
+git clone https://github.com/Chubtoad5/install-packages.git
+cd install-packages
+chmod +x install_packages.sh
+```
+
+**2. Pick a mode, then list the packages you want**
+```bash
+# Install now, from the internet:
+sudo ./install_packages.sh online curl jq git
+
+# Download the packages into a tarball to carry to an air-gapped host:
+sudo ./install_packages.sh save curl jq git
+
+# On the air-gapped host (with the saved tarball in this folder), install with no internet:
+sudo ./install_packages.sh offline curl jq git
+```
+
+> The offline host must run the **same OS version** as the host that created the tarball, or you'll
+> hit dependency errors. The script does **not** add third-party repos or GPG keys (e.g. `docker-ce`,
+> `kubectl`) — set those up first. See [Usage](#usage) below for the full parameter reference.
+
 ## Pre-requisites
 
 - Supported operating systems: ```ubuntu|debian|rhel|centos|rocky|almalinux|fedora|sles|opensuse-leap```
@@ -39,7 +73,7 @@ Example:
   sudo ./install_packages.sh online python3 python3-pip
 
   Only save the packages:
-  sudo ./install_packages.shE save python3 python3-pip
+  sudo ./install_packages.sh save python3 python3-pip
 
   Save and install the packages:
   sudo ./install_packages.sh save online python3 python3-pip
