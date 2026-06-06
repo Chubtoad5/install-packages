@@ -92,3 +92,16 @@ Example:
   Install packages from an offline tarball:
   sudo ./install_packages.sh offline python3 python3-pip
 ```
+---
+
+## Upstream / Credits
+
+This project uses the host distribution's package toolchains (apt/dpkg, dnf/createrepo_c, zypper); all credit to
+their distributions. See [NOTICE](NOTICE).
+
+When building an offline package repository it redistributes OS distribution packages — **each package keeps its
+own upstream license**; this project only repackages them for offline install.
+
+## License
+
+Licensed under the **Apache License 2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
