@@ -15,6 +15,14 @@ base_dir=$(pwd)
 PACKAGES_LIST=()
 mode_msg=""
 os_id=""
+rpm_pm=""
+source_dir=""
+# Tracks which package manager currently has the temporary local offline repo
+# configured, so the EXIT trap can always restore the original configuration.
+OFFLINE_REPO_ACTIVE=""
+# Set to 1 while an offline-packages staging directory created by THIS run
+# exists, so the EXIT trap only ever removes what this run created.
+STAGING_CREATED=0
 
 
 usage() {
@@ -62,6 +70,160 @@ os_type() {
     fi
 }
 
+detect_rpm_pm() {
+  # Pick the rpm-family package manager once, so install branches cannot drift
+  if command -v dnf &> /dev/null; then
+    rpm_pm="dnf"
+  elif command -v yum &> /dev/null; then
+    rpm_pm="yum"
+  else
+    echo "Error: Neither dnf nor yum found on this system." >&2
+    exit 1
+  fi
+}
+
+cleanup_on_exit() {
+  # Runs on EVERY exit (success, failure, interrupt). Restores the package
+  # manager configuration and removes only what this run created.
+  local rc=$?
+  restore_local_repo
+  if [[ $STAGING_CREATED -eq 1 ]]; then
+    rm -rf "$base_dir/offline-packages"
+  fi
+  rm -f "$base_dir/offline-packages.tar.gz.tmp"
+  exit "$rc"
+}
+
+setup_local_repo() {
+  # Point the host's package manager at the extracted offline-packages
+  # directory. Every path here is guarded so a re-run after an interrupted
+  # run cannot cascade backups or leak the trusted local repo.
+  case "$os_id" in
+    ubuntu|debian)
+      source_dir="/etc/apt/sources.list.d"
+      OFFLINE_REPO_ACTIVE="apt"
+      if [ -d "$source_dir" ]; then
+          # Remove any stale copy of our own repo file so it is never backed
+          # up or restored as if it were a real source
+          rm -f "$source_dir/offline-packages.list" "$source_dir/offline-packages.list.bak"
+          for file in "$source_dir"/*; do
+              [ -e "$file" ] || continue
+              case "$file" in
+                  *.bak) continue ;; # leftover backup from an interrupted run; restored after install
+              esac
+              mv "$file" "${file}.bak"
+          done
+          [ -e "/etc/apt/sources.list" ] && mv -n /etc/apt/sources.list /etc/apt/sources.list.bak
+      else
+          echo "  Sources.list directory not found. Skipping backup."
+      fi
+      echo "deb [trusted=yes] file:$local_repo_dir ./" | tee /etc/apt/sources.list.d/offline-packages.list &> /dev/null
+      ;;
+    rhel|centos|rocky|almalinux|fedora)
+      OFFLINE_REPO_ACTIVE="rpm"
+      echo "  Creating local repository..."
+      cat <<EOF | tee /etc/yum.repos.d/offline-packages.repo
+[offline-packages-repo]
+name=Offline Packages Repository
+baseurl=file://$local_repo_dir
+enabled=1
+gpgcheck=0
+EOF
+      ;;
+    sles|opensuse-leap)
+      OFFLINE_REPO_ACTIVE="zypper"
+      echo "  Adding temporary local repository..."
+      if zypper lr offline-packages-repo &> /dev/null; then
+          # stale repo left behind by an interrupted run
+          zypper --non-interactive removerepo offline-packages-repo
+      fi
+      zypper --non-interactive addrepo -G "file://$local_repo_dir" "offline-packages-repo"
+      zypper --non-interactive refresh offline-packages-repo
+      ;;
+  esac
+}
+
+restore_local_repo() {
+  # Restore the original package manager configuration. Idempotent: safe to
+  # call twice (success path and the EXIT trap).
+  case "$OFFLINE_REPO_ACTIVE" in
+    apt)
+      rm -f /etc/apt/sources.list.d/offline-packages.list
+      if [ -d "$source_dir" ]; then
+          for file in "$source_dir"/*.bak; do
+              [ -e "$file" ] || continue
+              mv -f "$file" "${file%.bak}"
+          done
+      fi
+      [ -e "/etc/apt/sources.list.bak" ] && mv -f /etc/apt/sources.list.bak /etc/apt/sources.list
+      ;;
+    rpm)
+      rm -f /etc/yum.repos.d/offline-packages.repo
+      ;;
+    zypper)
+      if zypper lr offline-packages-repo &> /dev/null; then
+          zypper --non-interactive removerepo offline-packages-repo || true
+      fi
+      ;;
+  esac
+  OFFLINE_REPO_ACTIVE=""
+}
+
+with_local_repo() {
+  # Set up the temporary local offline repo, run the given install command,
+  # and always restore the original repo configuration (the EXIT trap covers
+  # every failure path in between).
+  setup_local_repo
+  "$@"
+  echo "  Restoring repositories..."
+  restore_local_repo
+}
+
+apt_install_packages() {
+  # Shared by the online and offline apt paths (offline points apt at the
+  # local repo via setup_local_repo first)
+  if ! apt-get update -qq; then
+      echo "Error: apt-get update failed." >&2
+      return 1
+  fi
+  if ! echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PACKAGES_LIST[@]}"; then
+      echo "Error: apt-get install failed." >&2
+      return 1
+  fi
+}
+
+rpm_offline_install() {
+  $rpm_pm clean all
+  if ! $rpm_pm --disablerepo="*" --enablerepo="offline-packages-repo" install -y "${PACKAGES_LIST[@]}"; then
+      echo "Error: $rpm_pm install failed." >&2
+      return 1
+  fi
+}
+
+zypper_offline_install() {
+  # Scoped to the local repo only - the host's configured repos are left
+  # untouched and are never used for resolution
+  if ! zypper --non-interactive --no-refresh install -y --repo offline-packages-repo "${PACKAGES_LIST[@]}"; then
+      echo "Error: zypper install failed." >&2
+      return 1
+  fi
+}
+
+validate_archive_contents() {
+  # Fail early if the extracted archive does not contain packages for this
+  # host's OS family (e.g. a .deb archive on a Rocky/Leap host)
+  local pkg_ext=""
+  case "$os_id" in
+    ubuntu|debian) pkg_ext="deb" ;;
+    rhel|centos|rocky|almalinux|fedora|sles|opensuse-leap) pkg_ext="rpm" ;;
+  esac
+  if [[ -n "$pkg_ext" ]] && [[ -z "$(find "$base_dir/offline-packages" -name "*.${pkg_ext}" 2> /dev/null)" ]]; then
+      echo "Error: offline-packages.tar.gz contains no .${pkg_ext} packages for this OS ($os_id)." >&2
+      echo "       The archive was likely created on a different OS family. Re-create it with 'save' on a matching host." >&2
+      exit 1
+  fi
+}
+
 validate_runtime() {
 
   # Determine mode and packages
@@ -75,8 +237,14 @@ validate_runtime() {
       usage
     fi
     if [[ -f "$base_dir/offline-packages.tar.gz" ]]; then
+      if [[ -d "$base_dir/offline-packages" ]]; then
+        echo "  Removing stale offline-packages staging directory..."
+        rm -rf "$base_dir/offline-packages"
+      fi
       echo "  Extracting tarball..."
+      STAGING_CREATED=1
       tar -xzf "$base_dir/offline-packages.tar.gz" -C "$base_dir"
+      validate_archive_contents
     else
       echo "Error: Tarball not found. Place it in the same directory as this script."
       exit 1
@@ -99,69 +267,24 @@ install_packages() {
   case "$os_id" in
     ubuntu|debian)
       if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-        source_dir="/etc/apt/sources.list.d/"
-        if [ -d "$source_dir" ]; then
-            for file in "$source_dir"/*; do
-                [ -e "$file" ] && mv "$file" "${file}.bak"
-            done
-            [ -e "/etc/apt/sources.list" ] && mv /etc/apt/sources.list /etc/apt/sources.list.bak
-        else
-            echo "  Sources.list directory not found. Skipping backup."
-        fi
-        echo "deb [trusted=yes] file:$local_repo_dir ./" | tee -a /etc/apt/sources.list.d/offline-packages.list &> /dev/null
-        apt-get update -qq && echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PACKAGES_LIST[@]}" &> /dev/null
-        if [[ $? -ne 0 ]]; then
-            echo "Error: apt-get install failed." >&2
-            return 1
-        fi
-        rm -f /etc/apt/sources.list.d/offline-packages.list
-        if [ -d "$source_dir" ]; then
-            for file in "$source_dir"/*.bak; do
-                [ -e "$file" ] && mv "$file" "${file%.bak}"
-            done
-            [ -e "/etc/apt/sources.list.bak" ] && mv /etc/apt/sources.list.bak /etc/apt/sources.list
-        else
-            echo "  Sources.list directory not found. Skipping restore."
-        fi
+        with_local_repo apt_install_packages
       elif [[ $ONLINE_MODE -eq 1 ]]; then
-        apt-get update -qq && echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PACKAGES_LIST[@]}" &> /dev/null
-        if [[ $? -ne 0 ]]; then
-            echo "Error: apt-get install failed." >&2
-            return 1
-        fi
+        apt_install_packages
       else
         echo "Error: Installation method not specified."
         exit 1
       fi
       ;;
     rhel|centos|rocky|almalinux|fedora)
+      detect_rpm_pm
       if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-        echo "  Backing up repositories and creating local..."
-        cat <<EOF | tee /etc/yum.repos.d/offline-packages.repo
-[offline-packages-repo]
-name=Offline Packages Repository
-baseurl=file://$local_repo_dir
-enabled=1
-gpgcheck=0
-EOF
-        if command -v dnf &> /dev/null; then
-            dnf clean all
-            dnf --disablerepo="*" --enablerepo="offline-packages-repo" install -y "${PACKAGES_LIST[@]}"
-        elif command -v yum &> /dev/null; then
-            yum clean all
-            yum --disablerepo="*" --enablerepo="offline-packages-repo" install -y "${PACKAGES_LIST[@]}"
-        else
-            echo "  Repository directory not found. Skipping backup."
-        fi
-        rm -f /etc/yum.repos.d/offline-packages.repo
+        with_local_repo rpm_offline_install
         echo "  Package install finished"
       elif [[ $ONLINE_MODE -eq 1 ]]; then
-        if command -v dnf &> /dev/null; then
-            dnf clean all
-            dnf install -y "${PACKAGES_LIST[@]}"
-        elif command -v yum &> /dev/null; then
-            yum clean all
-            yum install -y "${PACKAGES_LIST[@]}"
+        $rpm_pm clean all
+        if ! $rpm_pm install -y "${PACKAGES_LIST[@]}"; then
+            echo "Error: $rpm_pm install failed." >&2
+            return 1
         fi
         echo "  Package install finished"
       else
@@ -171,21 +294,14 @@ EOF
       ;;
     sles|opensuse-leap)
       if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-        # offline install for SLES based
-        echo "  Backing up repositories and creating local..."
-        zypper repos --export /tmp/repos.bak
-        zypper removerepo --all
-        zypper addrepo "file://$local_repo_dir" "offline-packages-repo"
-        zypper refresh
-        zypper --no-refresh install -y "${PACKAGES_LIST[@]}"
-        echo "  Restoring repositories..."
-        zypper removerepo offline-packages-repo
-        zypper repos --import /tmp/repos.bak
-        rm -f /tmp/repos.bak
+        with_local_repo zypper_offline_install
         echo "  Package install finished"
       elif [[ $ONLINE_MODE -eq 1 ]]; then
-        zypper refresh
-        zypper install -y "${PACKAGES_LIST[@]}"
+        zypper --non-interactive refresh
+        if ! zypper --non-interactive install -y "${PACKAGES_LIST[@]}"; then
+            echo "Error: zypper install failed." >&2
+            return 1
+        fi
         echo "  Package install finished"
       else
         echo "Error: Installation method not specified."
@@ -254,6 +370,10 @@ if [[ $EUID -ne 0 ]]; then
     echo "Error: This script must be run with sudo or as root."
     usage
 fi
+
+# Always restore package manager configuration and clean up staging on exit,
+# preserving the real exit code (success and failure paths alike)
+trap cleanup_on_exit EXIT
 
 # Verify Operating System
 os_type
