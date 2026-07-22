@@ -367,6 +367,11 @@ save_packages() {
       find "$zypp_cache" -name "*.rpm" -exec cp {} "$DOWNLOAD_DIR" \;
       rm -rf "$zypp_cache"
       createrepo_c "$DOWNLOAD_DIR"
+      # Known limitation: zypper has no dnf-style --alldeps, so dependencies that
+      # are ALREADY INSTALLED on this build host are not fetched by either command
+      # above and will be missing from the archive on a minimal target.
+      echo "  NOTE: zypper cannot bundle dependencies already installed on this build host."
+      echo "        For guaranteed air-gap closure, run 'save' on a minimal/fresh SUSE host."
       ;;
     *)
       echo "Error: Unsupported OS '$os_id'. Manual download of packages may be required for air-gapped mode." >&2
