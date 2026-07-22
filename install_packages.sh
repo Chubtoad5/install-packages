@@ -318,20 +318,27 @@ install_packages() {
 
 save_packages() {
   DOWNLOAD_DIR="$base_dir/offline-packages"
+  if [[ -d "$DOWNLOAD_DIR" ]]; then
+    echo "  Removing stale offline-packages staging directory..."
+    rm -rf "$DOWNLOAD_DIR"
+  fi
   mkdir -p "$DOWNLOAD_DIR"
+  STAGING_CREATED=1
   case "$os_id" in
     ubuntu|debian)
       echo "  installing dpkg-dev"
-      apt-get update -qq && echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq install dpkg-dev &> /dev/null
+      apt-get update -qq
+      echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dpkg-dev
       cd "$DOWNLOAD_DIR"
-      local packages_to_download=$(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --no-pre-depends "${PACKAGES_LIST[@]}" | grep "^\w")
+      local packages_to_download
+      packages_to_download=$(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --no-pre-depends "${PACKAGES_LIST[@]}" | grep "^\w" || true)
       if [[ -z "$packages_to_download" ]]; then
           echo "Error: Failed to resolve dependencies for packages. Aborting." >&2
           cd "$base_dir"
           return 1
       fi
-      apt-get download $packages_to_download &> /dev/null
-      if [[ $? -ne 0 ]]; then
+      # shellcheck disable=SC2086
+      if ! apt-get download -qq $packages_to_download; then
           echo "Error: apt-get download failed." >&2
           cd "$base_dir"
           return 1
@@ -341,26 +348,42 @@ save_packages() {
       ;;
     rhel|centos|rocky|almalinux|fedora)
       dnf install -y dnf-utils createrepo_c
-      dnf download --resolve --downloaddir="$DOWNLOAD_DIR" "${PACKAGES_LIST[@]}"
+      # --alldeps: download the FULL dependency closure, including packages
+      # already installed on this host, so the archive works on minimal images
+      dnf download --resolve --alldeps --downloaddir="$DOWNLOAD_DIR" "${PACKAGES_LIST[@]}"
       createrepo_c "$DOWNLOAD_DIR"
       ;;
     sles|opensuse-leap)
-      zypper refresh
-      zypper install -y createrepo_c
-      rm -rf /var/cache/zypp/packages/*
-      zypper refresh
-      zypper install --download-only "${PACKAGES_LIST[@]}"
-      find /var/cache/zypp/packages/ -name "*.rpm" -exec sudo cp {} "$DOWNLOAD_DIR" \;
+      zypper --non-interactive refresh
+      zypper --non-interactive install -y createrepo_c
+      # Use a private package cache dir so the host's zypper cache is never
+      # touched, and download the named packages with 'zypper download' so
+      # they are fetched even when already installed on this host
+      zypp_cache="$DOWNLOAD_DIR/.zypp-cache"
+      mkdir -p "$zypp_cache"
+      zypper --non-interactive --pkg-cache-dir "$zypp_cache" download "${PACKAGES_LIST[@]}"
+      # Also download any dependencies not yet installed on this host
+      zypper --non-interactive --pkg-cache-dir "$zypp_cache" install -y --download-only --auto-agree-with-licenses "${PACKAGES_LIST[@]}"
+      find "$zypp_cache" -name "*.rpm" -exec cp {} "$DOWNLOAD_DIR" \;
+      rm -rf "$zypp_cache"
       createrepo_c "$DOWNLOAD_DIR"
       ;;
     *)
       echo "Error: Unsupported OS '$os_id'. Manual download of packages may be required for air-gapped mode." >&2
-      rm -rf "$base_dir/offline-packages"
       return 1
       ;;
   esac
-  tar -czf "$base_dir/offline-packages.tar.gz" -C "$base_dir" "offline-packages"
-  rm -rf "$base_dir/offline-packages"
+  # Verify packages actually landed in the staging directory before archiving
+  if [[ -z "$(find "$DOWNLOAD_DIR" -name "*.deb" -o -name "*.rpm" 2> /dev/null)" ]]; then
+      echo "Error: No package files were downloaded into $DOWNLOAD_DIR. Aborting." >&2
+      return 1
+  fi
+  # Write the archive atomically so an interrupted save never leaves a
+  # truncated offline-packages.tar.gz behind
+  tar -czf "$base_dir/offline-packages.tar.gz.tmp" -C "$base_dir" "offline-packages"
+  mv -f "$base_dir/offline-packages.tar.gz.tmp" "$base_dir/offline-packages.tar.gz"
+  rm -rf "$DOWNLOAD_DIR"
+  STAGING_CREATED=0
 }
 
 # --- Main Script --- #
@@ -418,16 +441,18 @@ echo "  ONLINE_MODE: $ONLINE_MODE"
 echo "  PACKAGES_LIST: ${PACKAGES_LIST[@]}"
 echo "  OS: $ID"
 
-if [[ $AIR_GAPPED_MODE -eq 1 ]] || [[ $ONLINE_MODE -eq 1 ]]; then
-  echo "--- Installing [ ${PACKAGES_LIST[@]} ] on $os_id..."
-  install_packages
-  echo "--- Finished installing ${PACKAGES_LIST[@]} on $os_id"
-fi
+# Save runs BEFORE install so 'save online' archives capture the packages
+# regardless of what is already installed on this host
 if [[ $SAVE_MODE -eq 1 ]]; then
   echo "--- Saving [ ${PACKAGES_LIST[@]} ] on $os_id..."
   save_packages
   echo "  Copy $base_dir/offline-packages.tar.gz and $SCRIPT_NAME to air-gapped host and run:"
   echo "    sudo ./$SCRIPT_NAME offline ${PACKAGES_LIST[@]}"
+fi
+if [[ $AIR_GAPPED_MODE -eq 1 ]] || [[ $ONLINE_MODE -eq 1 ]]; then
+  echo "--- Installing [ ${PACKAGES_LIST[@]} ] on $os_id..."
+  install_packages
+  echo "--- Finished installing ${PACKAGES_LIST[@]} on $os_id"
 fi
 echo "### Package Installer Ended at $(date) ###"
 
