@@ -65,3 +65,8 @@ fi'
   called 'apt-get download -qq curl=8.4.0-1 libfoo'
   tar -xzf offline-packages.tar.gz offline-packages/pins.lock -O | grep -q $'curl\t8.4\t8.4.0-1'
 }
+@test "still runs when piped to bash" {
+  run bash -c "cat '$BATS_TEST_DIRNAME/../../install_packages.sh' | bash -s -- --version"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ [0-9]+\.[0-9]+\.[0-9]+ ]]
+}
