@@ -7,13 +7,22 @@ set -o nounset
 set -o pipefail
 
 # --- Script Variables ---
+SCRIPT_VERSION="1.1.0"
 SCRIPT_NAME=$(basename "$0")
 AIR_GAPPED_MODE=0
 SAVE_MODE=0
 ONLINE_MODE=0
 base_dir=$(pwd)
 PACKAGES_LIST=()
-mode_msg=""
+# What actually goes to the package manager, after pins are resolved
+INSTALL_ARGS=()
+DOWNGRADE_ARGS=()
+# One "name<TAB>requested<TAB>resolved" line per pin
+PIN_RESULTS=()
+NO_UPGRADE=0
+ALLOW_DOWNGRADE=0
+# Set while the temporary local repo is the only source, so version lookups see only the bundle
+OFFLINE_SCOPE=0
 os_id=""
 rpm_pm=""
 source_dir=""
@@ -27,9 +36,9 @@ STAGING_CREATED=0
 
 usage() {
     cat << EOF
-Usage: $SCRIPT_NAME [offline] [save] [online] [package1 package2 package3 ...]
+Usage: $SCRIPT_NAME [offline] [save] [online] [options] [package1 package2=version package3 ...]
 
-This script must be run with root privileges.
+This script must be run with root privileges, apart from --version and --help.
 At least one parameter is required followed by a list of packages to install. [save] and [online] may be used together followed by the package(s) list. [offline] must be used alone followed by the package(s) list.
 
 Parameters:
@@ -38,9 +47,15 @@ Parameters:
   save            : Downloads and saves packages and dependencies as an offline install tarball.
   online          : Install packages and dependencies from the internet using default package manager repositories.
   [package(s)...] : A space separated list of package names to process.
+                    Pinning is optional. name=version picks a version on any supported distro, and may be
+                    just the start of one: docker-ce=28.5.2 takes the newest 28.5.2 build. A version that
+                    doesn't exist stops the run before anything is installed.
 
 Options:
-  -h, --help      : Show this help and exit.
+  --no-upgrade      : Keep an installed package at its current version. It still installs what's missing.
+  --allow-downgrade : Let a pin move an installed package backward. Without this, that stops the run.
+  --version         : Print this script's version and exit.
+  -h, --help        : Show this help and exit.
 
 Example:
   Only install the packages:
@@ -54,6 +69,9 @@ Example:
 
   Install packages from an offline tarball:
   sudo ./$SCRIPT_NAME offline python3 python3-pip
+
+  Pin a version, and leave what's already installed alone:
+  sudo ./$SCRIPT_NAME online --no-upgrade docker-ce=28.5.2 docker-ce-cli=28.5.2 jq
 EOF
     exit "${1:-1}"
 }
@@ -179,6 +197,163 @@ with_local_repo() {
   restore_local_repo
 }
 
+# --- Version pinning ---
+
+pkg_family() {
+  case "$os_id" in
+    ubuntu|debian) echo apt ;;
+    rhel|centos|rocky|almalinux|fedora) echo rpm ;;
+    sles|opensuse-leap) echo zypper ;;
+    *) echo unknown ;;
+  esac
+}
+
+# version_matches <requested> <available>: exact, or a prefix ending at a version boundary, ignoring
+# any epoch. So 28.5 matches 28.5.2 and 5:28.5.2-1, but not 28.50.
+version_matches() {
+  local req=$1 avail=$2 candidate next
+  for candidate in "$avail" "${avail#*:}"; do
+    [[ "$candidate" == "$req" ]] && return 0
+    if [[ "$candidate" == "$req"* ]]; then
+      next=${candidate:${#req}:1}
+      [[ "$next" =~ [0-9A-Za-z] ]] || return 0
+    fi
+  done
+  return 1
+}
+
+# available_versions <name>: newest first, one per line. In an offline run, only what's in the bundle.
+available_versions() {
+  local name=$1
+  case "$(pkg_family)" in
+    apt)
+      apt-cache madison "$name" 2>/dev/null | awk -F'|' '{ gsub(/ /, "", $2); if (!seen[$2]++) print $2 }'
+      ;;
+    rpm)
+      local scope=()
+      [[ $OFFLINE_SCOPE -eq 1 ]] && scope=(--disablerepo="*" --enablerepo="offline-packages-repo")
+      dnf -q repoquery "${scope[@]}" --showduplicates --qf '%{epoch}:%{version}-%{release}\n' "$name" 2>/dev/null \
+        | grep -v '^$' | sort -ruV
+      ;;
+    zypper)
+      local scope=()
+      [[ $OFFLINE_SCOPE -eq 1 ]] && scope=(--repo offline-packages-repo)
+      zypper --xmlout --non-interactive search "${scope[@]}" --details --match-exact --type package "$name" 2>/dev/null \
+        | grep -o 'edition="[^"]*"' | cut -d'"' -f2 | sort -ruV
+      ;;
+  esac
+}
+
+# installed_version <name>: empty when not installed
+installed_version() {
+  case "$(pkg_family)" in
+    apt)
+      dpkg-query -W -f='${db:Status-Abbrev}|${Version}\n' "$1" 2>/dev/null | awk -F'|' '$1 ~ /^ii/ { print $2 }'
+      ;;
+    *)
+      rpm -q --qf '%{EPOCH}:%{VERSION}-%{RELEASE}\n' "$1" 2>/dev/null | grep -v 'not installed' | sed 's/^(none)://' | head -n 1
+      ;;
+  esac
+}
+
+# version_cmp <a> <b>: prints -1, 0 or 1
+version_cmp() {
+  local a=$1 b=$2 first
+  if [[ "$(pkg_family)" == apt ]]; then
+    if dpkg --compare-versions "$a" lt "$b"; then echo -1
+    elif dpkg --compare-versions "$a" eq "$b"; then echo 0
+    else echo 1; fi
+    return 0
+  fi
+  [[ "$a" == *:* ]] || a="0:$a"
+  [[ "$b" == *:* ]] || b="0:$b"
+  [[ "$a" == "$b" ]] && { echo 0; return 0; }
+  first=$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n 1)
+  if [[ "$first" == "$a" ]]; then echo -1; else echo 1; fi
+}
+
+# install_spec <name> <resolved version>: how this package manager spells a version
+install_spec() {
+  case "$(pkg_family)" in
+    rpm) echo "$1-$2" ;;
+    *) echo "$1=$2" ;;
+  esac
+}
+
+# resolve_packages [save]: turns PACKAGES_LIST into INSTALL_ARGS and DOWNGRADE_ARGS. Runs after the
+# repositories are set up, so online and offline share it. With 'save', what's installed on this host
+# doesn't matter. A bare name, or anything without '=', is passed through exactly as given.
+resolve_packages() {
+  local mode=${1:-install} item name want versions version candidate installed
+  INSTALL_ARGS=(); DOWNGRADE_ARGS=(); PIN_RESULTS=()
+  for item in "${PACKAGES_LIST[@]}"; do
+    if [[ "$item" != *=* ]]; then
+      if [[ "$mode" != save && $NO_UPGRADE -eq 1 && -n "$(installed_version "$item")" ]]; then
+        echo "  keep: $item stays at $(installed_version "$item") (--no-upgrade)"
+        continue
+      fi
+      INSTALL_ARGS+=("$item")
+      continue
+    fi
+    name=${item%%=*}
+    want=${item#*=}
+    if [[ "$(pkg_family)" == rpm && "$rpm_pm" != dnf ]]; then
+      echo "Error: pins need dnf, and this host only has $rpm_pm: $item" >&2
+      return 1
+    fi
+    versions=$(available_versions "$name") || true
+    version=""
+    # An exact match wins, so 1.2-3.el9 can't resolve to 1.2-3.el9_8.1
+    while read -r candidate; do
+      if [[ "$candidate" == "$want" || "${candidate#*:}" == "$want" ]]; then version=$candidate; break; fi
+    done <<< "$versions"
+    if [[ -z "$version" ]]; then
+      while read -r candidate; do
+        if [[ -n "$candidate" ]] && version_matches "$want" "$candidate"; then version=$candidate; break; fi
+      done <<< "$versions"
+    fi
+    if [[ -z "$version" ]]; then
+      echo "Error: no version of $name matches '$want'." >&2
+      if [[ -n "$versions" ]]; then
+        echo "  Available, newest first: $(head -n 5 <<< "$versions" | tr '\n' ' ')" >&2
+      else
+        echo "  $name isn't available from the current sources." >&2
+      fi
+      return 1
+    fi
+    echo "  pin: $name $want -> $version"
+    PIN_RESULTS+=("$name"$'\t'"$want"$'\t'"$version")
+    if [[ "$mode" != save ]]; then
+      installed=$(installed_version "$name")
+      if [[ -n "$installed" ]]; then
+        if version_matches "$want" "$installed"; then
+          echo "  keep: $name is already at $installed, which matches the pin"
+          continue
+        fi
+        if [[ "$(version_cmp "$installed" "$version")" == 1 ]]; then
+          if [[ $ALLOW_DOWNGRADE -ne 1 ]]; then
+            echo "Error: $name is at $installed, which is newer than the pin ($version). Pass --allow-downgrade to move it back." >&2
+            return 1
+          fi
+          DOWNGRADE_ARGS+=("$(install_spec "$name" "$version")")
+          continue
+        fi
+      fi
+    fi
+    INSTALL_ARGS+=("$(install_spec "$name" "$version")")
+  done
+}
+
+nothing_to_install() {
+  if [[ ${#INSTALL_ARGS[@]} -eq 0 && ${#DOWNGRADE_ARGS[@]} -eq 0 ]]; then
+    echo "  Nothing to install."
+    return 0
+  fi
+  return 1
+}
+
+# --- Package manager wrappers ---
+
 apt_install_packages() {
   # Shared by the online and offline apt paths (offline points apt at the
   # local repo via setup_local_repo first)
@@ -186,16 +361,57 @@ apt_install_packages() {
       echo "Error: apt-get update failed." >&2
       return 1
   fi
-  if ! echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PACKAGES_LIST[@]}"; then
+  resolve_packages || return 1
+  nothing_to_install && return 0
+  if [[ ${#INSTALL_ARGS[@]} -gt 0 ]] && ! echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${INSTALL_ARGS[@]}"; then
       echo "Error: apt-get install failed." >&2
+      return 1
+  fi
+  if [[ ${#DOWNGRADE_ARGS[@]} -gt 0 ]] && ! echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades "${DOWNGRADE_ARGS[@]}"; then
+      echo "Error: apt-get install (downgrade) failed." >&2
+      return 1
+  fi
+}
+
+rpm_online_install() {
+  $rpm_pm clean all
+  resolve_packages || return 1
+  nothing_to_install && return 0
+  if [[ ${#INSTALL_ARGS[@]} -gt 0 ]] && ! $rpm_pm install -y "${INSTALL_ARGS[@]}"; then
+      echo "Error: $rpm_pm install failed." >&2
+      return 1
+  fi
+  if [[ ${#DOWNGRADE_ARGS[@]} -gt 0 ]] && ! $rpm_pm downgrade -y "${DOWNGRADE_ARGS[@]}"; then
+      echo "Error: $rpm_pm downgrade failed." >&2
       return 1
   fi
 }
 
 rpm_offline_install() {
   $rpm_pm clean all
-  if ! $rpm_pm --disablerepo="*" --enablerepo="offline-packages-repo" install -y "${PACKAGES_LIST[@]}"; then
+  OFFLINE_SCOPE=1
+  resolve_packages || return 1
+  nothing_to_install && return 0
+  if [[ ${#INSTALL_ARGS[@]} -gt 0 ]] && ! $rpm_pm --disablerepo="*" --enablerepo="offline-packages-repo" install -y "${INSTALL_ARGS[@]}"; then
       echo "Error: $rpm_pm install failed." >&2
+      return 1
+  fi
+  if [[ ${#DOWNGRADE_ARGS[@]} -gt 0 ]] && ! $rpm_pm --disablerepo="*" --enablerepo="offline-packages-repo" downgrade -y "${DOWNGRADE_ARGS[@]}"; then
+      echo "Error: $rpm_pm downgrade failed." >&2
+      return 1
+  fi
+}
+
+zypper_online_install() {
+  zypper --non-interactive refresh
+  resolve_packages || return 1
+  nothing_to_install && return 0
+  if [[ ${#INSTALL_ARGS[@]} -gt 0 ]] && ! zypper --non-interactive install -y "${INSTALL_ARGS[@]}"; then
+      echo "Error: zypper install failed." >&2
+      return 1
+  fi
+  if [[ ${#DOWNGRADE_ARGS[@]} -gt 0 ]] && ! zypper --non-interactive install -y --oldpackage "${DOWNGRADE_ARGS[@]}"; then
+      echo "Error: zypper install (downgrade) failed." >&2
       return 1
   fi
 }
@@ -203,8 +419,15 @@ rpm_offline_install() {
 zypper_offline_install() {
   # Scoped to the local repo only - the host's configured repos are left
   # untouched and are never used for resolution
-  if ! zypper --non-interactive --no-refresh install -y --repo offline-packages-repo "${PACKAGES_LIST[@]}"; then
+  OFFLINE_SCOPE=1
+  resolve_packages || return 1
+  nothing_to_install && return 0
+  if [[ ${#INSTALL_ARGS[@]} -gt 0 ]] && ! zypper --non-interactive --no-refresh install -y --repo offline-packages-repo "${INSTALL_ARGS[@]}"; then
       echo "Error: zypper install failed." >&2
+      return 1
+  fi
+  if [[ ${#DOWNGRADE_ARGS[@]} -gt 0 ]] && ! zypper --non-interactive --no-refresh install -y --oldpackage --repo offline-packages-repo "${DOWNGRADE_ARGS[@]}"; then
+      echo "Error: zypper install (downgrade) failed." >&2
       return 1
   fi
 }
@@ -281,11 +504,7 @@ install_packages() {
         with_local_repo rpm_offline_install
         echo "  Package install finished"
       elif [[ $ONLINE_MODE -eq 1 ]]; then
-        $rpm_pm clean all
-        if ! $rpm_pm install -y "${PACKAGES_LIST[@]}"; then
-            echo "Error: $rpm_pm install failed." >&2
-            return 1
-        fi
+        rpm_online_install || return 1
         echo "  Package install finished"
       else
         echo "Error: Installation method not specified."
@@ -297,11 +516,7 @@ install_packages() {
         with_local_repo zypper_offline_install
         echo "  Package install finished"
       elif [[ $ONLINE_MODE -eq 1 ]]; then
-        zypper --non-interactive refresh
-        if ! zypper --non-interactive install -y "${PACKAGES_LIST[@]}"; then
-            echo "Error: zypper install failed." >&2
-            return 1
-        fi
+        zypper_online_install || return 1
         echo "  Package install finished"
       else
         echo "Error: Installation method not specified."
@@ -329,14 +544,20 @@ save_packages() {
       echo "  installing dpkg-dev"
       apt-get update -qq
       echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dpkg-dev
+      resolve_packages save || return 1
       cd "$DOWNLOAD_DIR"
-      local packages_to_download
-      packages_to_download=$(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --no-pre-depends "${PACKAGES_LIST[@]}" | grep "^\w" || true)
+      local packages_to_download pin_line
+      local dep_names=("${PACKAGES_LIST[@]%%=*}")
+      packages_to_download=$(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --no-pre-depends "${dep_names[@]}" | grep "^\w" || true)
       if [[ -z "$packages_to_download" ]]; then
           echo "Error: Failed to resolve dependencies for packages. Aborting." >&2
           cd "$base_dir"
           return 1
       fi
+      # apt-cache prints bare names, and a bare 'apt-get download' takes the candidate, so swap in each pin
+      for pin_line in ${PIN_RESULTS[@]+"${PIN_RESULTS[@]}"}; do
+          packages_to_download=$(awk -v n="${pin_line%%$'\t'*}" -v s="${pin_line%%$'\t'*}=${pin_line##*$'\t'}" '$0 == n { print s; next } { print }' <<< "$packages_to_download")
+      done
       # shellcheck disable=SC2086
       if ! apt-get download -qq $packages_to_download; then
           echo "Error: apt-get download failed." >&2
@@ -347,23 +568,26 @@ save_packages() {
       cd "$base_dir"
       ;;
     rhel|centos|rocky|almalinux|fedora)
+      detect_rpm_pm
       dnf install -y dnf-utils createrepo_c
+      resolve_packages save || return 1
       # --alldeps: download the FULL dependency closure, including packages
       # already installed on this host, so the archive works on minimal images
-      dnf download --resolve --alldeps --downloaddir="$DOWNLOAD_DIR" "${PACKAGES_LIST[@]}"
+      dnf download --resolve --alldeps --downloaddir="$DOWNLOAD_DIR" "${INSTALL_ARGS[@]}"
       createrepo_c "$DOWNLOAD_DIR"
       ;;
     sles|opensuse-leap)
       zypper --non-interactive refresh
       zypper --non-interactive install -y createrepo_c
+      resolve_packages save || return 1
       # Use a private package cache dir so the host's zypper cache is never
       # touched, and download the named packages with 'zypper download' so
       # they are fetched even when already installed on this host
       zypp_cache="$DOWNLOAD_DIR/.zypp-cache"
       mkdir -p "$zypp_cache"
-      zypper --non-interactive --pkg-cache-dir "$zypp_cache" download "${PACKAGES_LIST[@]}"
+      zypper --non-interactive --pkg-cache-dir "$zypp_cache" download "${INSTALL_ARGS[@]}"
       # Also download any dependencies not yet installed on this host
-      zypper --non-interactive --pkg-cache-dir "$zypp_cache" install -y --download-only --auto-agree-with-licenses "${PACKAGES_LIST[@]}"
+      zypper --non-interactive --pkg-cache-dir "$zypp_cache" install -y --download-only --auto-agree-with-licenses "${INSTALL_ARGS[@]}"
       find "$zypp_cache" -name "*.rpm" -exec cp {} "$DOWNLOAD_DIR" \;
       rm -rf "$zypp_cache"
       createrepo_c "$DOWNLOAD_DIR"
@@ -383,6 +607,11 @@ save_packages() {
       echo "Error: No package files were downloaded into $DOWNLOAD_DIR. Aborting." >&2
       return 1
   fi
+  # Record what built this bundle. Pinning is optional, so the lock file only exists with pins.
+  echo "$SCRIPT_VERSION" > "$DOWNLOAD_DIR/HELPER_VERSION"
+  if [[ ${#PIN_RESULTS[@]} -gt 0 ]]; then
+    printf '%s\n' "${PIN_RESULTS[@]}" > "$DOWNLOAD_DIR/pins.lock"
+  fi
   # Write the archive atomically so an interrupted save never leaves a
   # truncated offline-packages.tar.gz behind
   tar -czf "$base_dir/offline-packages.tar.gz.tmp" -C "$base_dir" "offline-packages"
@@ -392,6 +621,19 @@ save_packages() {
 }
 
 # --- Main Script --- #
+
+# When sourced by a test harness, stop here: only the functions above are wanted.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
+# These two work for anyone, so they come before the root check
+for arg in "$@"; do
+  case "$arg" in
+    --version) echo "$SCRIPT_VERSION"; exit 0 ;;
+    -h|--help) usage 0 ;;
+  esac
+done
 
 # Check for root or sudo
 if [[ $EUID -ne 0 ]]; then
@@ -424,6 +666,14 @@ while [[ $# -gt 0 ]]; do
             ONLINE_MODE=1
             shift
             ;;
+        --no-upgrade)
+            NO_UPGRADE=1
+            shift
+            ;;
+        --allow-downgrade)
+            ALLOW_DOWNGRADE=1
+            shift
+            ;;
         -*)
             echo "Error: Unknown option '$1'."
             usage
@@ -440,24 +690,25 @@ validate_runtime
 
 # Display script settings
 echo "### Package Installer Started at $(date) ###"
+echo "  VERSION: $SCRIPT_VERSION"
 echo "  AIR_GAPPED_MODE: $AIR_GAPPED_MODE"
 echo "  SAVE_MODE: $SAVE_MODE"
 echo "  ONLINE_MODE: $ONLINE_MODE"
-echo "  PACKAGES_LIST: ${PACKAGES_LIST[@]}"
+echo "  PACKAGES_LIST: ${PACKAGES_LIST[*]}"
 echo "  OS: $ID"
 
 # Save runs BEFORE install so 'save online' archives capture the packages
 # regardless of what is already installed on this host
 if [[ $SAVE_MODE -eq 1 ]]; then
-  echo "--- Saving [ ${PACKAGES_LIST[@]} ] on $os_id..."
+  echo "--- Saving [ ${PACKAGES_LIST[*]} ] on $os_id..."
   save_packages
   echo "  Copy $base_dir/offline-packages.tar.gz and $SCRIPT_NAME to air-gapped host and run:"
-  echo "    sudo ./$SCRIPT_NAME offline ${PACKAGES_LIST[@]}"
+  echo "    sudo ./$SCRIPT_NAME offline ${PACKAGES_LIST[*]}"
 fi
 if [[ $AIR_GAPPED_MODE -eq 1 ]] || [[ $ONLINE_MODE -eq 1 ]]; then
-  echo "--- Installing [ ${PACKAGES_LIST[@]} ] on $os_id..."
+  echo "--- Installing [ ${PACKAGES_LIST[*]} ] on $os_id..."
   install_packages
-  echo "--- Finished installing ${PACKAGES_LIST[@]} on $os_id"
+  echo "--- Finished installing ${PACKAGES_LIST[*]} on $os_id"
 fi
 echo "### Package Installer Ended at $(date) ###"
 
