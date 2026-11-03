@@ -66,6 +66,8 @@ exit $fail
 L
 cat > "$CASES/standalone.sh" <<'L'
 source /cases/lib.sh; work
+# A minimal Leap container has no tar, which this script assumes
+command -v zypper >/dev/null && zypper -q --non-interactive install -y tar gzip >/dev/null 2>&1
 expect "standalone: online, nothing but a name" ./install_packages.sh online jq
 expect "standalone: save, nothing but a name" ./install_packages.sh save jq
 tar -tzf offline-packages.tar.gz | grep -q pins.lock && bad "a lock file appeared with no pins" || ok "no lock file without pins"
