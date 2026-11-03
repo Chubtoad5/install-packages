@@ -18,6 +18,7 @@ STUB
 called() { grep -qF -- "$1" "$STUB_LOG"; }
 # Source a script for its functions. Its strict mode and any EXIT trap would otherwise take over the test shell.
 load_script() {
+  # shellcheck disable=SC1090
   source "$BATS_TEST_DIRNAME/../../$1"
   trap - EXIT
   set +eu

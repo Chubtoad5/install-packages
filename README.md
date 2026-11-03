@@ -110,6 +110,30 @@ Example:
 ```
 ---
 
+## Version pinning
+
+Pinning is optional. With no pin, and no new flag, everything works as it always has.
+
+```bash
+# Any supported distro. The start of a version is enough: this takes the newest 28.5.2 build.
+sudo ./install_packages.sh online docker-ce=28.5.2 docker-ce-cli=28.5.2
+
+# Leave what's already installed alone, and still install what's missing
+sudo ./install_packages.sh online --no-upgrade docker-ce jq
+
+# A pin older than the installed version refuses, unless you ask for it
+sudo ./install_packages.sh online --allow-downgrade docker-ce=28.5.2
+
+sudo ./install_packages.sh --version
+```
+
+- A version that doesn't exist stops the run before anything is installed, and lists what's available.
+- `28.5` matches `28.5.2` but not `28.50`. An exact version wins over a longer build with the same start.
+- `save` downloads the pinned version and records it in `offline-packages/pins.lock`. `offline` only looks in the bundle.
+- `--no-upgrade` covers the packages you name, not every dependency.
+- Holding a package against later upgrades (`apt-mark hold` and the like) is out of scope.
+- A pin needs `dnf` on the RHEL family. The older `yum` fallback fails with a clear message.
+
 ## Upstream / Credits
 
 This project uses the host distribution's package toolchains (apt/dpkg, dnf/createrepo_c, zypper); all credit to
