@@ -14,12 +14,12 @@ setup() { load_script install_packages.sh; }
   version_matches 28.5.2-1~ubuntu.24.04~noble 5:28.5.2-1~ubuntu.24.04~noble
 }
 @test "a prefix stopping mid-number or mid-word doesn't match" {
-  ! version_matches 28.5 5:28.50.1-1
-  ! version_matches 2 5:28.5.2-1
-  ! version_matches 28.5.2-1 5:28.5.2-10
+  ! version_matches 28.5 5:28.50.1-1 || false
+  ! version_matches 2 5:28.5.2-1 || false
+  ! version_matches 28.5.2-1 5:28.5.2-10 || false
   ! version_matches 1.2 1.2a-1
 }
 @test "a different version doesn't match" {
-  ! version_matches 29 5:28.5.2-1
+  ! version_matches 29 5:28.5.2-1 || false
   ! version_matches 28.6 5:28.5.2-1
 }

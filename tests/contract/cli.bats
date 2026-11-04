@@ -56,7 +56,7 @@ fi'
   [ -s offline-packages.tar.gz ]
   tar -tzf offline-packages.tar.gz | grep -qx 'offline-packages/curl_1.0_amd64.deb'
   tar -tzf offline-packages.tar.gz | grep -qx 'offline-packages/HELPER_VERSION'
-  ! tar -tzf offline-packages.tar.gz | grep -q pins.lock
+  ! tar -tzf offline-packages.tar.gz | grep -q pins.lock || false
   [ ! -d offline-packages ]
 }
 @test "save with a pin downloads the pinned version and records it" {
