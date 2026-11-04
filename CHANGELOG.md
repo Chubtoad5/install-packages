@@ -1,5 +1,29 @@
 # Changelog — install-packages
 
+## v1.1.0 — 2026-11-03 — Optional version pinning
+
+Pinning is optional. A plain `install_packages.sh online curl` behaves exactly as before, so nothing needs to change
+for anyone using this script on its own.
+
+### Added
+- **`name=version` on any supported distro.** It can be just the start of a version: `docker-ce=28.5.2` takes the
+  newest 28.5.2 build, and `28.5` won't match `28.50`. An exact version wins over a longer build with the same start.
+  A version that doesn't exist stops the run before anything is installed, and lists what's available.
+- **Pins survive `save`.** The archive holds the pinned version, and `offline-packages/pins.lock` records what each
+  pin resolved to. `offline` looks versions up in the bundle only. With no pins, no lock file is written.
+- **`--no-upgrade`** keeps an installed package where it is, and still installs what's missing.
+- **`--allow-downgrade`.** A pin older than the installed version refuses without it.
+- **`--version`, and `SCRIPT_VERSION`.** `--version` and `--help` now work without root. The banner and each archive
+  (`offline-packages/HELPER_VERSION`) record the version.
+- **Tests:** `tests/unit`, `tests/contract` and `tests/integration`. Run the first two with `bats` from any clone.
+
+### Changed
+- A package argument with `=` now goes through version lookup instead of straight to `apt-get`. A full apt version
+  string still works.
+
+### Fixed
+- Five `shellcheck` errors: arrays mixed into strings in the banner and progress messages.
+
 ## 2026-09-09 — Idempotence release (feature/idempotence-phase2)
 
 Suite-wide idempotence and correctness pass. `install_packages.sh` is now safe to call
