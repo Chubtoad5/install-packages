@@ -166,7 +166,8 @@ L
 rc=0
 run() { # run <image> <case>
   echo "=== $1: $2"
-  docker run --rm -v "$REPO:/repo:ro" -v "$CASES:/cases:ro" -v "$OUT:/out" "$1" bash "/cases/$2.sh" || rc=1
+  # z relabels the mounts for a host enforcing SELinux, and does nothing on one that isn't.
+  docker run --rm -v "$REPO:/repo:ro,z" -v "$CASES:/cases:ro,z" -v "$OUT:/out:z" "$1" bash "/cases/$2.sh" || rc=1
 }
 run ubuntu:24.04 apt;       run ubuntu:24.04 apt-offline;  run ubuntu:24.04 standalone
 run ubuntu:22.04 apt;       run ubuntu:22.04 apt-offline
