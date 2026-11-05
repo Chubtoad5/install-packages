@@ -3,7 +3,17 @@
 set -uo pipefail
 REPO=$PWD
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq && apt-get install -y -qq docker.io >/dev/null 2>&1
+. /etc/os-release
+# Docker to run the cases in, from wherever this distro gets it. Rocky's own repos don't have it.
+case "$ID" in
+  rocky)
+    curl -fsSL https://download.docker.com/linux/rhel/docker-ce.repo -o /etc/yum.repos.d/docker-ce.repo
+    dnf install -y -q docker-ce >/dev/null 2>&1; systemctl enable --now docker >/dev/null 2>&1 ;;
+  opensuse*)
+    zypper -n -q install docker curl >/dev/null 2>&1; systemctl enable --now docker >/dev/null 2>&1 ;;
+  *)
+    apt-get update -qq && apt-get install -y -qq docker.io curl >/dev/null 2>&1 ;;
+esac
 docker version --format 'docker {{.Server.Version}}' || exit 1
 CASES=$(mktemp -d)
 OUT=$(mktemp -d)
@@ -156,12 +166,25 @@ L
 rc=0
 run() { # run <image> <case>
   echo "=== $1: $2"
-  docker run --rm -v "$REPO:/repo:ro" -v "$CASES:/cases:ro" -v "$OUT:/out" "$1" bash "/cases/$2.sh" || rc=1
+  # z relabels the mounts for a host enforcing SELinux, and does nothing on one that isn't.
+  docker run --rm -v "$REPO:/repo:ro,z" -v "$CASES:/cases:ro,z" -v "$OUT:/out:z" "$1" bash "/cases/$2.sh" || rc=1
 }
 run ubuntu:24.04 apt;       run ubuntu:24.04 apt-offline;  run ubuntu:24.04 standalone
 run ubuntu:22.04 apt;       run ubuntu:22.04 apt-offline
 run debian:12 apt;          run debian:12 apt-offline
 run rockylinux:9 rpm;       run rockylinux:9 rpm-offline;  run rockylinux:9 standalone
 run opensuse/leap:15.6 zypper; run opensuse/leap:15.6 zypper-offline; run opensuse/leap:15.6 standalone
+# The containers above are the same on every host. This is the real package manager on this host itself, so what a
+# distro's run adds is this part. It's a throwaway clone, so a case may remove packages from it.
+host_run() {
+  echo "=== this host, $PRETTY_NAME: $1"
+  ln -sfn "$REPO" /repo; ln -sfn "$CASES" /cases; ln -sfn "$OUT" /out
+  bash "/cases/$1.sh" || rc=1
+}
+case "$ID" in
+  rocky) host_run rpm; host_run rpm-offline; host_run standalone ;;
+  opensuse*) host_run zypper; host_run zypper-offline; host_run standalone ;;
+  *) host_run standalone ;;
+esac
 echo "=== exit $rc"
 exit $rc
