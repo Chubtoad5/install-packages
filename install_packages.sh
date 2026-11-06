@@ -586,8 +586,8 @@ save_packages() {
       zypp_root="$DOWNLOAD_DIR/.zypp-root"
       zypp_cache="$DOWNLOAD_DIR/.zypp-cache"
       mkdir -p "$zypp_root" "$zypp_cache"
-      # The root trusts the keys this host trusts, so signature checks there pass or fail as they would here
-      rpm --root "$zypp_root" --initdb
+      # The root trusts the keys this host trusts, so signature checks there pass or fail as they would here. The first
+      # import creates the root's RPM database: 'rpm --initdb' can't, where SELinux is enforcing, as it is by default on Leap 16
       while read -r zypp_key; do
         [[ -n "$zypp_key" ]] || continue
         rpm -q --qf '%{DESCRIPTION}\n' "$zypp_key" > "$zypp_root/key.asc"
