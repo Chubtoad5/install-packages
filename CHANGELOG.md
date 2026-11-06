@@ -1,5 +1,22 @@
 # Changelog — install-packages
 
+## v1.1.1 — 2026-11-06 — SUSE bundles hold the whole dependency set
+
+### Fixed
+- **`save` on SLES and openSUSE bundles what's already installed on the build host.** zypper only fetched
+  dependencies this host didn't have yet, so a Docker bundle built on a host with Docker held 3 packages, and an
+  offline install on a clean host failed with `nothing provides 'catatonit'`. `save` now resolves into an empty root
+  that shares this host's repositories, so it fetches the full set, as the dnf and apt paths already did. The same
+  bundle now holds 150 packages, about 142 MB, and installs offline on a clean Leap 16 host. The host's own RPM
+  database and package cache are never touched.
+- The note that `save` printed on every SUSE run, asking for a fresh host, is gone.
+
+### Tests
+- `tests/integration`: a Leap 16 case builds a Docker bundle on a host with Docker, then installs it on a clean
+  container with every repo off. On a Leap host, the host itself builds the bundle. Both fail at v1.1.0.
+
+No option, argument, exit code or archive layout changed.
+
 ## v1.1.0 — 2026-11-03 — Optional version pinning
 
 Pinning is optional. A plain `install_packages.sh online curl` behaves exactly as before, so nothing needs to change
