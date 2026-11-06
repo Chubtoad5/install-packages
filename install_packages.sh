@@ -7,7 +7,7 @@ set -o nounset
 set -o pipefail
 
 # --- Script Variables ---
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.1.1"
 SCRIPT_NAME=$(basename "$0")
 AIR_GAPPED_MODE=0
 SAVE_MODE=0
@@ -580,22 +580,23 @@ save_packages() {
       zypper --non-interactive refresh
       zypper --non-interactive install -y createrepo_c
       resolve_packages save || return 1
-      # Use a private package cache dir so the host's zypper cache is never
-      # touched, and download the named packages with 'zypper download' so
-      # they are fetched even when already installed on this host
+      # zypper has no dnf-style --alldeps, and skips whatever is already installed on this host. So resolve into an
+      # empty root that shares this host's repos: nothing is installed there, so zypper fetches the full
+      # dependency set, as the dnf and apt paths do. The host's RPM database and package cache are never touched.
+      zypp_root="$DOWNLOAD_DIR/.zypp-root"
       zypp_cache="$DOWNLOAD_DIR/.zypp-cache"
-      mkdir -p "$zypp_cache"
-      zypper --non-interactive --pkg-cache-dir "$zypp_cache" download "${INSTALL_ARGS[@]}"
-      # Also download any dependencies not yet installed on this host
-      zypper --non-interactive --pkg-cache-dir "$zypp_cache" install -y --download-only --auto-agree-with-licenses "${INSTALL_ARGS[@]}"
-      find "$zypp_cache" -name "*.rpm" -exec cp {} "$DOWNLOAD_DIR" \;
-      rm -rf "$zypp_cache"
+      mkdir -p "$zypp_root" "$zypp_cache"
+      # The root trusts the keys this host trusts, so signature checks there pass or fail as they would here. The first
+      # import creates the root's RPM database: 'rpm --initdb' can't, where SELinux is enforcing, as it is by default on Leap 16
+      while read -r zypp_key; do
+        [[ -n "$zypp_key" ]] || continue
+        rpm -q --qf '%{DESCRIPTION}\n' "$zypp_key" > "$zypp_root/key.asc"
+        rpm --root "$zypp_root" --import "$zypp_root/key.asc" || echo "  warning: could not copy key $zypp_key into the package root" >&2
+      done < <(rpm -qa gpg-pubkey)
+      zypper --non-interactive --installroot "$zypp_root" --pkg-cache-dir "$zypp_cache" install -y --download-only --auto-agree-with-licenses "${INSTALL_ARGS[@]}"
+      find "$zypp_cache" "$zypp_root" -name "*.rpm" -exec cp {} "$DOWNLOAD_DIR" \;
+      rm -rf "$zypp_root" "$zypp_cache"
       createrepo_c "$DOWNLOAD_DIR"
-      # Known limitation: zypper has no dnf-style --alldeps, so dependencies that
-      # are ALREADY INSTALLED on this build host are not fetched by either command
-      # above and will be missing from the archive on a minimal target.
-      echo "  NOTE: zypper cannot bundle dependencies already installed on this build host."
-      echo "        For guaranteed air-gap closure, run 'save' on a minimal/fresh SUSE host."
       ;;
     *)
       echo "Error: Unsupported OS '$os_id'. Manual download of packages may be required for air-gapped mode." >&2

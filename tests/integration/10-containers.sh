@@ -163,6 +163,34 @@ refuse "offline asking for a version not in the bundle fails" ./install_packages
 zypper lr offline-packages-repo >/dev/null 2>&1 && bad "local repo left behind" || ok "local repo removed"
 exit $fail
 L
+# A bundle built where its packages are already installed. zypper used to skip what this host has, so a bundle for
+# Docker built next to Docker left out catatonit and iptables, and couldn't install on a clean host.
+cat > "$CASES/zypper-closure.sh" <<'L'
+source /cases/lib.sh; work
+zypper -q --non-interactive install -y tar gzip findutils docker >/dev/null 2>&1
+rpm -q docker catatonit iptables >/dev/null && ok "this host already has docker, catatonit and iptables" || bad "docker didn't install here"
+expect "save docker, with docker installed" ./install_packages.sh save docker docker-compose curl
+for p in docker catatonit iptables containerd runc; do
+  tar -tzf offline-packages.tar.gz | grep -q "/$p-[0-9]" && ok "bundle holds $p" || bad "bundle has no $p"
+done
+grep -q 'NOTE: zypper cannot bundle' /tmp/out && bad "still prints the old note" || ok "no note about missing dependencies"
+rpm -q docker >/dev/null && ok "this host's docker is still installed" || bad "this host lost docker"
+zypper lr 2>/dev/null | grep -q zypp-root && bad "a repo for the empty root was left behind" || ok "this host's repos are unchanged"
+cp offline-packages.tar.gz /out/closure.tar.gz
+exit $fail
+L
+cat > "$CASES/zypper-closure-offline.sh" <<'L'
+source /cases/lib.sh; work
+zypper -q --non-interactive install -y tar gzip findutils >/dev/null 2>&1
+rpm -q docker >/dev/null 2>&1 && bad "this container shouldn't have docker yet" || ok "a clean host, with no docker"
+# Turn every repo off, so nothing can come from anywhere but the bundle
+zypper -q --non-interactive modifyservice --disable --all >/dev/null 2>&1; zypper -q --non-interactive modifyrepo --disable --all >/dev/null 2>&1
+cp /out/closure.tar.gz offline-packages.tar.gz
+expect "offline install of docker from that bundle" ./install_packages.sh offline docker docker-compose curl
+rpm -q catatonit iptables >/dev/null && ok "catatonit and iptables came from the bundle" || bad "missing: $(rpm -q catatonit iptables | grep 'not installed')"
+expect "docker runs" docker --version
+exit $fail
+L
 rc=0
 run() { # run <image> <case>
   echo "=== $1: $2"
@@ -174,6 +202,7 @@ run ubuntu:22.04 apt;       run ubuntu:22.04 apt-offline
 run debian:12 apt;          run debian:12 apt-offline
 run rockylinux:9 rpm;       run rockylinux:9 rpm-offline;  run rockylinux:9 standalone
 run opensuse/leap:15.6 zypper; run opensuse/leap:15.6 zypper-offline; run opensuse/leap:15.6 standalone
+run opensuse/leap:16.0 zypper-closure; run opensuse/leap:16.0 zypper-closure-offline
 # The containers above are the same on every host. This is the real package manager on this host itself, so what a
 # distro's run adds is this part. It's a throwaway clone, so a case may remove packages from it.
 host_run() {
@@ -183,7 +212,8 @@ host_run() {
 }
 case "$ID" in
   rocky) host_run rpm; host_run rpm-offline; host_run standalone ;;
-  opensuse*) host_run zypper; host_run zypper-offline; host_run standalone ;;
+  # This host already has Docker, from the top of this file, so it builds the bundle for real and a clean container installs it.
+  opensuse*) host_run zypper; host_run zypper-offline; host_run standalone; host_run zypper-closure; run opensuse/leap:16.0 zypper-closure-offline ;;
   *) host_run standalone ;;
 esac
 echo "=== exit $rc"
