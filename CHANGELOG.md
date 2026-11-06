@@ -9,6 +9,7 @@
   that shares this host's repositories, so it fetches the full set, as the dnf and apt paths already did. The same
   bundle now holds 150 packages, about 142 MB, and installs offline on a clean Leap 16 host. The host's own RPM
   database and package cache are never touched.
+  The root trusts the same signing keys as this host, so a host that checks each package's signature still saves.
 - The note that `save` printed on every SUSE run, asking for a fresh host, is gone.
 
 ### Tests

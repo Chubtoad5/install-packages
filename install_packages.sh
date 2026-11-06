@@ -586,6 +586,13 @@ save_packages() {
       zypp_root="$DOWNLOAD_DIR/.zypp-root"
       zypp_cache="$DOWNLOAD_DIR/.zypp-cache"
       mkdir -p "$zypp_root" "$zypp_cache"
+      # The root trusts the keys this host trusts, so signature checks there pass or fail as they would here
+      rpm --root "$zypp_root" --initdb
+      while read -r zypp_key; do
+        [[ -n "$zypp_key" ]] || continue
+        rpm -q --qf '%{DESCRIPTION}\n' "$zypp_key" > "$zypp_root/key.asc"
+        rpm --root "$zypp_root" --import "$zypp_root/key.asc" || echo "  warning: could not copy key $zypp_key into the package root" >&2
+      done < <(rpm -qa gpg-pubkey)
       zypper --non-interactive --installroot "$zypp_root" --pkg-cache-dir "$zypp_cache" install -y --download-only --auto-agree-with-licenses "${INSTALL_ARGS[@]}"
       find "$zypp_cache" "$zypp_root" -name "*.rpm" -exec cp {} "$DOWNLOAD_DIR" \;
       rm -rf "$zypp_root" "$zypp_cache"
