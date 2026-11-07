@@ -197,12 +197,18 @@ run() { # run <image> <case>
   # z relabels the mounts for a host enforcing SELinux, and does nothing on one that isn't.
   docker run --rm -v "$REPO:/repo:ro,z" -v "$CASES:/cases:ro,z" -v "$OUT:/out:z" "$1" bash "/cases/$2.sh" || rc=1
 }
-run ubuntu:24.04 apt;       run ubuntu:24.04 apt-offline;  run ubuntu:24.04 standalone
-run ubuntu:22.04 apt;       run ubuntu:22.04 apt-offline
-run debian:12 apt;          run debian:12 apt-offline
-run rockylinux:9 rpm;       run rockylinux:9 rpm-offline;  run rockylinux:9 standalone
-run opensuse/leap:15.6 zypper; run opensuse/leap:15.6 zypper-offline; run opensuse/leap:15.6 standalone
-run opensuse/leap:16.0 zypper-closure; run opensuse/leap:16.0 zypper-closure-offline
+# Spec 09, S5: the containers are the same on every host, so they run on Ubuntu 24.04 only. By hand (no CI_DISTRO) they
+# always run. The host cases below run on every distro.
+if [[ -z "${CI_DISTRO:-}" || "$CI_DISTRO" == "Ubuntu 24.04" ]]; then
+  run ubuntu:24.04 apt;       run ubuntu:24.04 apt-offline;  run ubuntu:24.04 standalone
+  run ubuntu:22.04 apt;       run ubuntu:22.04 apt-offline
+  run debian:12 apt;          run debian:12 apt-offline
+  run rockylinux:9 rpm;       run rockylinux:9 rpm-offline;  run rockylinux:9 standalone
+  run opensuse/leap:15.6 zypper; run opensuse/leap:15.6 zypper-offline; run opensuse/leap:15.6 standalone
+  run opensuse/leap:16.0 zypper-closure; run opensuse/leap:16.0 zypper-closure-offline
+else
+  echo "SKIP  the container cases: they run on Ubuntu 24.04 only (spec 09, S5)"
+fi
 # The containers above are the same on every host. This is the real package manager on this host itself, so what a
 # distro's run adds is this part. It's a throwaway clone, so a case may remove packages from it.
 host_run() {
