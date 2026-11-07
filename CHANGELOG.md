@@ -1,5 +1,26 @@
 # Changelog — install-packages
 
+## v1.1.2 — 2026-11-07 — A failed apt install says why
+
+### Fixed
+- **A failed apt install names the package that's in the way.** apt runs with `-qq`, which hides its explanation, so
+  a failure printed only `E: Unmet dependencies` or `E: Unable to correct problems, you have held broken packages`.
+  Now, when an install or downgrade fails, the same request runs again as a dry run, which changes nothing, and its
+  "unmet dependencies" lines are printed after the error, for example
+  `curl : Depends: libcurl4t64 (= 8.5.0-2ubuntu10.16) but 8.5.0-2ubuntu10.8 is to be installed`. apt 3's wording
+  (`Unsatisfied dependencies:`) is found too. The install itself works exactly as before.
+
+### Tests
+- `tests/unit/apt-explain.bats`: the explanation, for apt 2 and apt 3 wording, for a downgrade, and when apt says nothing.
+- `tests/integration`: a package whose dependency nothing provides, from a local repository, on every Ubuntu host and
+  in an Ubuntu 22.04 container. The error must name the missing dependency. It fails at v1.1.1.
+- `tests/integration` sets up Docker only on the hosts whose cases use it: Ubuntu 24.04 (the container cases) and
+  Leap. On Rocky 10's image kernel, installing Docker brought in a newer kernel, Docker couldn't start until a reboot,
+  and the run stopped before any case. Where Docker is needed and won't start, that's one failure, and the host cases
+  still run. On Rocky, Docker is installed with the running kernel's `kernel-modules-extra`, so no newer kernel comes in.
+
+No option, argument, exit code or archive layout changed.
+
 ## v1.1.1 — 2026-11-06 — SUSE bundles hold the whole dependency set
 
 ### Fixed
