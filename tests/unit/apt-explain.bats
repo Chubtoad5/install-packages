@@ -64,8 +64,14 @@ esac'
   run apt_explain_failure nosuchpkg
   [[ "$output" == *"E: Unable to locate package nosuchpkg"* ]]
 }
-@test "a dry run that says nothing adds nothing" {
+@test "a dry run that says nothing adds nothing, and doesn't end the run" {
   stub apt-get 'exit 100'
   run apt_explain_failure curl
+  [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+@test "with errexit on, as the script runs, a silent dry run still returns" {
+  stub apt-get 'exit 100'
+  run bash -c 'set -e; source "$1"; set -e; apt_explain_failure curl; echo returned' _ "$BATS_TEST_DIRNAME/../../install_packages.sh"
+  [[ "$output" == *returned* ]]
 }

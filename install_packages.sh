@@ -382,7 +382,7 @@ apt_explain_failure() {
   local out why
   out=$(echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -s "$@" 2>&1) || true
   why=$(sed -nE '/(unmet|Unsatisfied) dependencies:/,/^(E|Error):/p' <<< "$out")
-  [[ -n "$why" ]] || why=$(grep -E '^(E|Error|W|Warning):' <<< "$out")
+  [[ -n "$why" ]] || why=$(grep -E '^(E|Error|W|Warning):' <<< "$out") || true
   [[ -n "$why" ]] || return 0
   echo "  apt's reason:" >&2
   head -n 40 <<< "$why" | sed 's/^/    /' >&2
