@@ -4,17 +4,35 @@ set -uo pipefail
 REPO=$PWD
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
-# Docker to run the cases in, from wherever this distro gets it. Rocky's own repos don't have it.
-case "$ID" in
-  rocky)
-    curl -fsSL https://download.docker.com/linux/rhel/docker-ce.repo -o /etc/yum.repos.d/docker-ce.repo
-    dnf install -y -q docker-ce >/dev/null 2>&1; systemctl enable --now docker >/dev/null 2>&1 ;;
-  opensuse*)
-    zypper -n -q install docker curl >/dev/null 2>&1; systemctl enable --now docker >/dev/null 2>&1 ;;
-  *)
-    apt-get update -qq && apt-get install -y -qq docker.io curl >/dev/null 2>&1 ;;
-esac
-docker version --format 'docker {{.Server.Version}}' || exit 1
+# Spec 09, S5: the container cases are the same on every host, so they run on Ubuntu 24.04 only. By hand (no
+# CI_DISTRO) they always run. Leap's host cases use Docker too. No other host case needs it, so other hosts don't set it
+# up: on Rocky 10's image kernel, a Docker that wouldn't start used to stop the run before any case (spec 11, U2).
+containers=0
+[[ -z "${CI_DISTRO:-}" || "${CI_DISTRO:-}" == "Ubuntu 24.04" ]] && containers=1
+need_docker=$containers
+[[ "$ID" == opensuse* ]] && need_docker=1
+rc=0
+if ((need_docker)); then
+  # From wherever this distro gets it. Rocky's own repos don't have it.
+  case "$ID" in
+    rocky)
+      curl -fsSL https://download.docker.com/linux/rhel/docker-ce.repo -o /etc/yum.repos.d/docker-ce.repo
+      # Docker's iptables needs a kernel-modules-extra. Left to choose, dnf takes the newest, which brings a newer
+      # kernel, and the running one can't load its modules until a reboot. The running kernel's own package avoids that.
+      dnf install -y -q docker-ce "kernel-modules-extra-$(uname -r)" >/dev/null 2>&1 || dnf install -y -q docker-ce >/dev/null 2>&1
+      systemctl enable --now docker >/dev/null 2>&1 ;;
+    opensuse*)
+      zypper -n -q install docker curl >/dev/null 2>&1; systemctl enable --now docker >/dev/null 2>&1 ;;
+    *)
+      apt-get update -qq && apt-get install -y -qq docker.io curl >/dev/null 2>&1 ;;
+  esac
+  if ! docker version --format 'docker {{.Server.Version}}'; then
+    # The host cases below still run
+    echo "FAIL  Docker didn't start on this host (kernel $(uname -r)), so the cases that need it can't run:"
+    journalctl -u docker --no-pager 2>/dev/null | grep -oE 'failed to (start|register).{0,150}' | tail -1 | sed 's/^/      /'
+    rc=1; containers=0; need_docker=0
+  fi
+fi
 CASES=$(mktemp -d)
 OUT=$(mktemp -d)
 chmod 755 "$CASES" "$OUT"
@@ -191,22 +209,37 @@ rpm -q catatonit iptables >/dev/null && ok "catatonit and iptables came from the
 expect "docker runs" docker --version
 exit $fail
 L
-rc=0
+# Spec 11, U1: apt runs with -qq, which hid why an install failed. A package whose dependency nothing provides must
+# fail, and the error must name that dependency. Runs on the host and in a container, so it sees more than one apt.
+cat > "$CASES/apt-unmet.sh" <<'L'
+source /cases/lib.sh; work
+R=$(mktemp -d -p /var/tmp); chmod 755 "$R"; mkdir -p "$R/pkg/DEBIAN"
+printf '%s\n' "Package: ci-unmet-probe" "Version: 1.0" "Architecture: all" "Maintainer: install-packages tests <ci@localhost>" \
+  "Depends: ci-missing-dep (>= 1.0)" "Description: a test package whose dependency nothing provides" > "$R/pkg/DEBIAN/control"
+deb=$R/ci-unmet-probe_1.0_all.deb
+dpkg-deb -b "$R/pkg" "$deb" >/dev/null
+{ dpkg-deb -f "$deb"; echo "Filename: ./$(basename "$deb")"; echo "Size: $(stat -c %s "$deb")"; echo "SHA256: $(sha256sum "$deb" | cut -d' ' -f1)"; echo; } > "$R/Packages"
+echo "deb [trusted=yes] file:$R ./" > /etc/apt/sources.list.d/ci-unmet.list
+refuse "an install whose dependency nothing provides fails" ./install_packages.sh online ci-unmet-probe
+grep -q 'ci-missing-dep' /tmp/out && ok "and the error names the missing dependency" || { bad "the error doesn't name the missing dependency"; tail -5 /tmp/out | cut -c1-160; }
+rm -f /etc/apt/sources.list.d/ci-unmet.list; apt-get update -qq >/dev/null 2>&1
+dpkg -s ci-unmet-probe >/dev/null 2>&1 && bad "the test package was installed" || ok "nothing was installed"
+exit $fail
+L
 run() { # run <image> <case>
   echo "=== $1: $2"
   # z relabels the mounts for a host enforcing SELinux, and does nothing on one that isn't.
   docker run --rm -v "$REPO:/repo:ro,z" -v "$CASES:/cases:ro,z" -v "$OUT:/out:z" "$1" bash "/cases/$2.sh" || rc=1
 }
-# Spec 09, S5: the containers are the same on every host, so they run on Ubuntu 24.04 only. By hand (no CI_DISTRO) they
-# always run. The host cases below run on every distro.
-if [[ -z "${CI_DISTRO:-}" || "$CI_DISTRO" == "Ubuntu 24.04" ]]; then
+# Which hosts run the containers is decided at the top. The host cases below run on every distro.
+if ((containers)); then
   run ubuntu:24.04 apt;       run ubuntu:24.04 apt-offline;  run ubuntu:24.04 standalone
-  run ubuntu:22.04 apt;       run ubuntu:22.04 apt-offline
+  run ubuntu:22.04 apt;       run ubuntu:22.04 apt-offline;  run ubuntu:22.04 apt-unmet
   run debian:12 apt;          run debian:12 apt-offline
   run rockylinux:9 rpm;       run rockylinux:9 rpm-offline;  run rockylinux:9 standalone
   run opensuse/leap:15.6 zypper; run opensuse/leap:15.6 zypper-offline; run opensuse/leap:15.6 standalone
   run opensuse/leap:16.0 zypper-closure; run opensuse/leap:16.0 zypper-closure-offline
-else
+elif ((rc == 0)); then
   echo "SKIP  the container cases: they run on Ubuntu 24.04 only (spec 09, S5)"
 fi
 # The containers above are the same on every host. This is the real package manager on this host itself, so what a
@@ -219,8 +252,9 @@ host_run() {
 case "$ID" in
   rocky) host_run rpm; host_run rpm-offline; host_run standalone ;;
   # This host already has Docker, from the top of this file, so it builds the bundle for real and a clean container installs it.
-  opensuse*) host_run zypper; host_run zypper-offline; host_run standalone; host_run zypper-closure; run opensuse/leap:16.0 zypper-closure-offline ;;
-  *) host_run standalone ;;
+  opensuse*) host_run zypper; host_run zypper-offline; host_run standalone; host_run zypper-closure
+    ((need_docker)) && run opensuse/leap:16.0 zypper-closure-offline ;;
+  *) host_run standalone; host_run apt-unmet ;;
 esac
 echo "=== exit $rc"
 exit $rc

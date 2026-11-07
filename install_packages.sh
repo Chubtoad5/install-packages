@@ -7,7 +7,7 @@ set -o nounset
 set -o pipefail
 
 # --- Script Variables ---
-SCRIPT_VERSION="1.1.1"
+SCRIPT_VERSION="1.1.2"
 SCRIPT_NAME=$(basename "$0")
 AIR_GAPPED_MODE=0
 SAVE_MODE=0
@@ -365,12 +365,27 @@ apt_install_packages() {
   nothing_to_install && return 0
   if [[ ${#INSTALL_ARGS[@]} -gt 0 ]] && ! echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${INSTALL_ARGS[@]}"; then
       echo "Error: apt-get install failed." >&2
+      apt_explain_failure "${INSTALL_ARGS[@]}"
       return 1
   fi
   if [[ ${#DOWNGRADE_ARGS[@]} -gt 0 ]] && ! echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades "${DOWNGRADE_ARGS[@]}"; then
       echo "Error: apt-get install (downgrade) failed." >&2
+      apt_explain_failure --allow-downgrades "${DOWNGRADE_ARGS[@]}"
       return 1
   fi
+}
+
+# -qq hides apt's reasons, so a failed install said only "Unmet dependencies". Ask again as a dry run, which
+# changes nothing, and show the lines that name the packages. apt 2.x says "have unmet dependencies:", apt 3 says
+# "Unsatisfied dependencies:".
+apt_explain_failure() {
+  local out why
+  out=$(echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -s "$@" 2>&1) || true
+  why=$(sed -nE '/(unmet|Unsatisfied) dependencies:/,/^(E|Error):/p' <<< "$out")
+  [[ -n "$why" ]] || why=$(grep -E '^(E|Error|W|Warning):' <<< "$out")
+  [[ -n "$why" ]] || return 0
+  echo "  apt's reason:" >&2
+  head -n 40 <<< "$why" | sed 's/^/    /' >&2
 }
 
 rpm_online_install() {
