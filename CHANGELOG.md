@@ -11,7 +11,8 @@
   build host has, and resolves again until nothing new turns up. A Leap 16 Docker bundle gains `container-selinux`,
   `rpm-plugin-selinux`, `policycoreutils`, `selinux-tools`, `selinux-policy` and `selinux-policy-targeted`, and installs
   with SELinux enforcing. Only the plain `(A if B)` form is read, and the target is assumed to be built like the build
-  host, as before.
+  host, as before. If zypper can't add those packages, `save` warns and keeps the bundle it has, so a save that worked
+  before still works.
 
 ### Tests
 - `tests/unit/zypper-save.bats`: which conditional requirements are added, and which are left out.

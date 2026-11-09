@@ -631,7 +631,11 @@ save_packages() {
         [[ ${#zypp_new[@]} -gt 0 ]] || break
         zypp_extra+=("${zypp_new[@]}")
         echo "  Adding what this host's packages require, which the empty root can't see (round $zypp_round): ${zypp_new[*]}"
-        zypper --non-interactive --installroot "$zypp_root" --pkg-cache-dir "$zypp_cache" install -y --download-only --auto-agree-with-licenses "${INSTALL_ARGS[@]}" "${zypp_extra[@]}"
+        # A save that worked before this round mustn't fail on it: warn, and keep the bundle as it stands
+        if ! zypper --non-interactive --installroot "$zypp_root" --pkg-cache-dir "$zypp_cache" install -y --download-only --auto-agree-with-licenses "${INSTALL_ARGS[@]}" "${zypp_extra[@]}"; then
+          echo "  warning: zypper couldn't add ${zypp_new[*]}, so the bundle leaves them out. A target with this host's packages will need them from local media." >&2
+          break
+        fi
       done
       find "$zypp_cache" "$zypp_root" -name "*.rpm" -exec cp {} "$DOWNLOAD_DIR" \;
       rm -rf "$zypp_root" "$zypp_cache"
