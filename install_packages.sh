@@ -626,7 +626,7 @@ save_packages() {
       for zypp_round in 1 2 3 4 5; do
         zypp_new=()
         while read -r zypp_a; do
-          [[ " ${zypp_extra[*]} " == *" $zypp_a "* ]] || zypp_new+=("$zypp_a")
+          [[ " ${zypp_extra[*]} ${zypp_new[*]} " == *" $zypp_a "* ]] || zypp_new+=("$zypp_a")
         done < <(zypper_conditional_extras "$zypp_cache" "$zypp_root")
         [[ ${#zypp_new[@]} -gt 0 ]] || break
         zypp_extra+=("${zypp_new[@]}")
@@ -635,6 +635,9 @@ save_packages() {
         if ! zypper --non-interactive --installroot "$zypp_root" --pkg-cache-dir "$zypp_cache" install -y --download-only --auto-agree-with-licenses "${INSTALL_ARGS[@]}" "${zypp_extra[@]}"; then
           echo "  warning: zypper couldn't add ${zypp_new[*]}, so the bundle leaves them out. A target with this host's packages will need them from local media." >&2
           break
+        fi
+        if [[ $zypp_round -eq 5 ]]; then
+          echo "  warning: conditional requirements still turned up new packages after 5 rounds; the bundle stops there." >&2
         fi
       done
       find "$zypp_cache" "$zypp_root" -name "*.rpm" -exec cp {} "$DOWNLOAD_DIR" \;
