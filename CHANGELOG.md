@@ -1,5 +1,23 @@
 # Changelog — install-packages
 
+## v1.1.3 — 2026-11-09 — SUSE bundles carry what an SELinux host needs
+
+### Fixed
+- **A SUSE bundle of Docker installs on a clean SELinux host** (spec 15, F7). Leap 16's `docker` requires
+  `(container-selinux if selinux-policy)`, and SELinux is on by default there. `save` resolves into an empty root, which
+  has no `selinux-policy`, so zypper left `container-selinux` out, and an offline install stopped with
+  "requires '(container-selinux if selinux-policy)', but this requirement cannot be provided", offering to remove the
+  host's SELinux policy. Now `save` reads each `(A if B)` requirement of what it downloaded, adds every A whose B the
+  build host has, and resolves again until nothing new turns up. A Leap 16 Docker bundle gains `container-selinux`,
+  `rpm-plugin-selinux`, `policycoreutils`, `selinux-tools`, `selinux-policy` and `selinux-policy-targeted`, and installs
+  with SELinux enforcing. Only the plain `(A if B)` form is read, and the target is assumed to be built like the build
+  host, as before.
+
+### Tests
+- `tests/unit/zypper-save.bats`: which conditional requirements are added, and which are left out.
+- `tests/scenarios` (A1): on SUSE, the bundle holds Docker too, and on an enforcing host the offline install must bring
+  `container-selinux`. It fails at v1.1.2.
+
 ## v1.1.2 — 2026-11-07 — A failed apt install says why
 
 ### Fixed

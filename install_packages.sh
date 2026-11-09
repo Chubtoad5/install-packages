@@ -7,7 +7,7 @@ set -o nounset
 set -o pipefail
 
 # --- Script Variables ---
-SCRIPT_VERSION="1.1.2"
+SCRIPT_VERSION="1.1.3"
 SCRIPT_NAME=$(basename "$0")
 AIR_GAPPED_MODE=0
 SAVE_MODE=0
@@ -417,6 +417,17 @@ rpm_offline_install() {
   fi
 }
 
+# zypper_conditional_extras <dir>...: the A of each "(A if B)" requirement of the rpms under the dirs, for each B this host
+# has, one per line. A SUSE save resolves in an empty root, where no B is installed, so zypper leaves every such A out, and
+# a target built like this host can't install the bundle. On Leap 16, docker requires '(container-selinux if
+# selinux-policy)', and SELinux is on by default (spec 15, F7). Only the plain "(A if B)" form is read.
+zypper_conditional_extras() {
+  local a b
+  while read -r a b; do
+    if rpm -q --whatprovides "$b" &> /dev/null; then echo "$a"; fi
+  done < <(find "$@" -name "*.rpm" -exec rpm -qp --requires {} + 2> /dev/null | sed -nE 's/^\(([^ ()]+) if ([^ ()]+)\)$/\1 \2/p' | sort -u)
+}
+
 zypper_online_install() {
   zypper --non-interactive refresh
   resolve_packages || return 1
@@ -609,6 +620,19 @@ save_packages() {
         rpm --root "$zypp_root" --import "$zypp_root/key.asc" || echo "  warning: could not copy key $zypp_key into the package root" >&2
       done < <(rpm -qa gpg-pubkey)
       zypper --non-interactive --installroot "$zypp_root" --pkg-cache-dir "$zypp_cache" install -y --download-only --auto-agree-with-licenses "${INSTALL_ARGS[@]}"
+      # A conditional requirement never fires in the empty root. Add each one this host's packages switch on, and resolve
+      # again until no new one turns up.
+      zypp_extra=()
+      for zypp_round in 1 2 3 4 5; do
+        zypp_new=()
+        while read -r zypp_a; do
+          [[ " ${zypp_extra[*]} " == *" $zypp_a "* ]] || zypp_new+=("$zypp_a")
+        done < <(zypper_conditional_extras "$zypp_cache" "$zypp_root")
+        [[ ${#zypp_new[@]} -gt 0 ]] || break
+        zypp_extra+=("${zypp_new[@]}")
+        echo "  Adding what this host's packages require, which the empty root can't see (round $zypp_round): ${zypp_new[*]}"
+        zypper --non-interactive --installroot "$zypp_root" --pkg-cache-dir "$zypp_cache" install -y --download-only --auto-agree-with-licenses "${INSTALL_ARGS[@]}" "${zypp_extra[@]}"
+      done
       find "$zypp_cache" "$zypp_root" -name "*.rpm" -exec cp {} "$DOWNLOAD_DIR" \;
       rm -rf "$zypp_root" "$zypp_cache"
       createrepo_c "$DOWNLOAD_DIR"

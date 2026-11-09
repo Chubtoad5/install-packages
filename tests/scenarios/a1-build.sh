@@ -1,5 +1,5 @@
 #!/bin/bash
-# A1, on the host that builds the bundle: save jq and tree, then hand the archive to the next role.
+# A1, on the host that builds the bundle: save jq and tree (and Docker on SUSE), then hand the archive to the next role.
 set -uo pipefail
 REPO=$PWD
 fail=0
@@ -9,7 +9,10 @@ bad() { echo "FAIL  $1"; fail=1; }
 within() { local t=$1 i; shift; for ((i = 0; i < t; i += 3)); do "$@" && return 0; sleep 3; done; "$@"; }
 W=$(mktemp -d -p /var/tmp); cd "$W" || exit 1
 cp "$REPO/install_packages.sh" .; chmod +x install_packages.sh
-if ./install_packages.sh save jq tree > "$W/o" 2>&1 && [ -s offline-packages.tar.gz ]; then
+# On SUSE, Docker too: it requires '(container-selinux if selinux-policy)', which only fires on an SELinux host (spec 15, F7).
+. /etc/os-release
+pkgs=(jq tree); [[ "$ID" =~ ^(sles|opensuse-leap)$ ]] && pkgs+=(docker)
+if ./install_packages.sh save "${pkgs[@]}" > "$W/o" 2>&1 && [ -s offline-packages.tar.gz ]; then
   ok "save builds offline-packages.tar.gz ($(du -h offline-packages.tar.gz | cut -f1))"
   cp offline-packages.tar.gz "$CI_HANDOFF/" && ok "hand the bundle on" || bad "hand the bundle on"
 else
